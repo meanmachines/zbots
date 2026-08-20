@@ -156,8 +156,15 @@ async def _dashboard_request(method: str, path: str, *, params: Optional[dict] =
     return r
 
 
-async def dash_get(path: str, **params) -> Any:
-    r = await _dashboard_request("GET", path, params=params)
+async def dash_get(path: str, query: Optional[dict] = None, **params) -> Any:
+    """query exists alongside **params so a caller can pass a query param
+    actually named "path" (e.g. /api/files?path=...) without colliding
+    with this function's own first positional argument of the same name --
+    dash_get("/api/files", path=x) raises "multiple values for argument
+    'path'" instead of doing what it looks like it does. Real bug, found
+    live: every Files-page directory beyond root, and every file read,
+    500'd because of exactly this."""
+    r = await _dashboard_request("GET", path, params={**(query or {}), **params})
     if r.status_code >= 400:
         raise HTTPException(status_code=r.status_code, detail=r.text[:500])
     return r.json()
@@ -216,6 +223,21 @@ def _bot_session_rollover_n(title: str, profile: str) -> Optional[int]:
 
 def _api_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {API_SERVER_KEY}", "Content-Type": "application/json"}
+
+
+_STREAM_CORRUPTION_RE = re.compile(r"(<unused\d+>\s*){3,}")
+
+
+def _is_corrupted_reply(text: str) -> bool:
+    """Detects the garbage-token artifact from a known upstream bug where
+    Hermes cancels its internal LLM stream after ~1.5s of silence during
+    prefill -- hits hardest on self-hosted/local providers with large
+    system prompts or big models, exactly this platform's core use case
+    (NousResearch/hermes-agent#87697, open, no fix as of writing). The
+    corrupted reply is otherwise indistinguishable from a real one (still a
+    200, still valid JSON), so this is the only place it can be caught.
+    """
+    return bool(_STREAM_CORRUPTION_RE.search(text or ""))
 
 
 async def _list_bot_sessions(client: httpx.AsyncClient, base: str, profile: str) -> list[dict]:
@@ -322,27 +344,51 @@ async def send_to_bot(profile: str, message: str, *, timeout: float = 300.0) -> 
     get_bot_messages() merges every rollover back into one continuous
     thread, so this is invisible to the user beyond the reply arriving
     from a "new" session under the hood.
+
+    Separately, a 200 response can still carry a corrupted reply -- see
+    _is_corrupted_reply's docstring (hermes-agent#87697). That's not a
+    wedged session, just a bad single turn, so the fix is a plain retry on
+    the same session (no rollover) rather than the 500 path above.
     """
     base = _bot_base(profile)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        session_id, all_sessions = await _ensure_bot_chat_session(client, base, profile)
-        r = await client.post(
-            f"{base}/api/sessions/{session_id}/chat",
+
+    async def _post(sid: str):
+        return await client.post(
+            f"{base}/api/sessions/{sid}/chat",
             json={"message": message},
             headers=_api_headers(),
         )
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        session_id, all_sessions = await _ensure_bot_chat_session(client, base, profile)
+        r = await _post(session_id)
         if r.status_code == 500:
             session_id = await _roll_over_bot_session(client, base, profile, all_sessions)
-            r = await client.post(
-                f"{base}/api/sessions/{session_id}/chat",
-                json={"message": message},
-                headers=_api_headers(),
-            )
+            r = await _post(session_id)
         if r.status_code >= 400:
             raise HTTPException(status_code=r.status_code, detail=r.text[:500])
         result = r.json()
         msg = result.get("message")
-        return str(msg.get("content") or "") if isinstance(msg, dict) else ""
+        reply = str(msg.get("content") or "") if isinstance(msg, dict) else ""
+
+        if _is_corrupted_reply(reply):
+            r = await _post(session_id)
+            if r.status_code == 500:
+                session_id = await _roll_over_bot_session(client, base, profile, all_sessions)
+                r = await _post(session_id)
+            if r.status_code >= 400:
+                raise HTTPException(status_code=r.status_code, detail=r.text[:500])
+            result = r.json()
+            msg = result.get("message")
+            retried = str(msg.get("content") or "") if isinstance(msg, dict) else ""
+            if not _is_corrupted_reply(retried):
+                reply = retried
+            # Both attempts corrupted: return the first one rather than loop
+            # forever -- the user still sees something, and it's on them to
+            # notice and retry manually if their prompt/model combo is
+            # consistently hitting the ~1.5s prefill window from #87697.
+
+        return reply
 
 
 async def get_bot_activity(profile: str) -> dict:
@@ -524,6 +570,15 @@ async def create_bot(body: BotCreate) -> RosterEntry:
     raise HTTPException(status_code=500, detail="Bot created but not found in roster afterward.")
 
 
+@app.get("/bots/{name}/soul")
+async def get_bot_soul(name: str) -> dict:
+    """So the edit modal can show what's actually there instead of a blank
+    textarea -- previously write-only, forcing a user who wanted to tweak
+    one line of an existing soul to retype the whole thing from memory."""
+    name = _validate_name(name)
+    return await dash_get(f"/api/profiles/{name}/soul")
+
+
 class BotUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
@@ -547,9 +602,42 @@ async def update_bot(name: str, body: BotUpdate) -> dict:
         await dash_send("PUT", f"/api/profiles/{name}/description", {"description": body.description})
     if body.provider and body.model:
         await dash_send("PUT", f"/api/profiles/{name}/model", {"provider": body.provider, "model": body.model})
+        await _lock_active_session_model(name, body.provider, body.model)
     if body.soul is not None:
         await dash_send("PUT", f"/api/profiles/{name}/soul", {"content": body.soul})
     return {"ok": True}
+
+
+async def _lock_active_session_model(profile: str, provider: str, model: str) -> None:
+    """Changing a profile's default model only affects brand-new sessions.
+    Hermes pins a session's model to whatever it resolved on its first turn
+    (api_server.py's _stored_session_model reads session["model"], not the
+    live profile config) and our own chat calls never pass an explicit
+    override, so an already-open conversation would otherwise keep
+    answering with the old model until it happens to roll over -- verified
+    live: switching a bot's model here left its current session's stored
+    model untouched. Hermes has a real endpoint for exactly this,
+    POST /api/sessions/{id}/model, described in its own source as
+    "backend-ack a Browser model lock" -- call it so switching model from
+    the chat header actually takes effect on the conversation you're
+    looking at, not just the next one. Best-effort: the profile default
+    above has already been saved either way, so a failure here (e.g. no
+    session yet) shouldn't fail the whole request.
+    """
+    state = _read_state()
+    session_id = (state.get("active_sessions") or {}).get(profile)
+    if not session_id:
+        return
+    base = _bot_base(profile)
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            await client.post(
+                f"{base}/api/sessions/{session_id}/model",
+                json={"provider": provider, "model": model},
+                headers=_api_headers(),
+            )
+    except httpx.HTTPError:
+        pass
 
 
 class DuplicateRequest(BaseModel):
@@ -1154,12 +1242,12 @@ async def set_webhook_enabled(name: str, body: ToggleBody) -> dict:
 
 @app.get("/files")
 async def list_files(path: str = "") -> Any:
-    return await dash_get("/api/files", **({"path": path} if path else {}))
+    return await dash_get("/api/files", query={"path": path} if path else None)
 
 
 @app.get("/files/read")
 async def read_file(path: str) -> Any:
-    return await dash_get("/api/files/read", path=path)
+    return await dash_get("/api/files/read", query={"path": path})
 
 
 class MkdirBody(BaseModel):

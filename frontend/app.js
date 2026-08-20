@@ -12,7 +12,21 @@ let showHidden = false;
 let selected = null; // {kind: "bot"|"group", id: string}
 let rosterPollTimer = null;
 let messagesPollTimer = null;
-let sending = false;
+let lastRenderedCount = -1; // -1 means "next render is a fresh thread open, don't animate"
+
+// Keyed by "kind:id" so a reply in flight for one bot/group doesn't lock
+// the composer for every other chat -- multi-bot is the whole point of
+// this app, you should be able to message bot B while bot A is thinking.
+let sendingKeys = new Set();
+
+function chatKey(sel) {
+  return sel ? `${sel.kind}:${sel.id}` : null;
+}
+
+function updateComposerState() {
+  const btn = document.getElementById("send-btn");
+  if (btn) btn.disabled = sendingKeys.has(chatKey(selected));
+}
 
 // ---------------------------------------------------------------------
 // Tiny fetch helpers
@@ -407,6 +421,11 @@ function openEditModal(entry) {
     document.getElementById("bot-provider").onchange();
     document.getElementById("bot-model").value = entry.model || "";
   });
+  apiGet(`/bots/${entry.name}/soul`)
+    .then((res) => {
+      document.getElementById("bot-soul").value = res.content || "";
+    })
+    .catch(() => {});
   document.getElementById("bot-modal-backdrop").classList.add("open");
 }
 
@@ -432,7 +451,10 @@ document.getElementById("bot-form").addEventListener("submit", async (e) => {
         description,
         provider: provider || undefined,
         model: model || undefined,
-        soul: soul || undefined,
+        // Edit mode prefills this field with the bot's real current soul,
+        // so unlike create, an empty value here is a deliberate clear, not
+        // "user didn't set one" -- must still be sent, not dropped.
+        soul,
       });
       toast(`${title || editingBot.name} updated`);
     } else {
@@ -562,15 +584,96 @@ function renderChatHeader(entry) {
   avatarSlot.appendChild(avatarNode(entry.name, entry.avatar));
   document.getElementById("chat-header-title").textContent = entry.title;
   const modelEl = document.getElementById("chat-header-model");
-  modelEl.textContent = entry.model || "";
-  modelEl.style.display = entry.model ? "" : "none";
-  modelEl.title = entry.provider ? `Provider: ${entry.provider}` : "";
+  modelEl.textContent = entry.model || "Set model";
+  modelEl.style.display = "";
+  modelEl.title = entry.provider ? `Provider: ${entry.provider} -- click to change model` : "Click to set a model";
+  modelEl.onclick = (e) => openModelSwitcher(e, entry.name);
   document.getElementById("chat-header-desc").textContent = entry.description || entry.name;
   document.getElementById("composer-input").placeholder = `Message ${entry.title}`;
 }
 
+// ---------------------------------------------------------------------
+// Model switcher -- click the model pill in the chat header to see and
+// change which model/provider a bot is using, without going through the
+// full Edit modal for something this quick.
+// ---------------------------------------------------------------------
+
+async function openModelSwitcher(e, botName) {
+  e.stopPropagation();
+  const pop = document.getElementById("model-switcher");
+  const rect = e.currentTarget.getBoundingClientRect();
+  pop.style.left = rect.left + "px";
+  pop.style.top = rect.bottom + 6 + "px";
+  pop.innerHTML = "<div class='popover-group-label'>Loading...</div>";
+  pop.classList.add("open");
+
+  let models = [];
+  try {
+    const res = await apiGet("/models");
+    models = res.models || [];
+  } catch (err) {
+    if (pop.classList.contains("open")) {
+      pop.innerHTML = "<div class='popover-group-label'>Failed to load models</div>";
+    }
+    return;
+  }
+  if (!pop.classList.contains("open")) return; // closed while the fetch was in flight
+
+  const entry = roster.find((r) => r.name === botName);
+  pop.innerHTML = "";
+  if (!models.length) {
+    pop.innerHTML = "<div class='popover-group-label'>No providers configured -- add one on the Models page.</div>";
+    return;
+  }
+
+  const byProvider = new Map();
+  models.forEach((m) => {
+    if (!byProvider.has(m.provider)) byProvider.set(m.provider, []);
+    byProvider.get(m.provider).push(m.model);
+  });
+
+  byProvider.forEach((modelNames, provider) => {
+    const label = document.createElement("div");
+    label.className = "popover-group-label";
+    label.textContent = provider;
+    pop.appendChild(label);
+    modelNames.forEach((model) => {
+      const isCurrent = entry && entry.provider === provider && entry.model === model;
+      const item = document.createElement("div");
+      item.className = "popover-item" + (isCurrent ? " current" : "");
+      const nameSpan = document.createElement("span");
+      nameSpan.textContent = model;
+      item.appendChild(nameSpan);
+      if (isCurrent) {
+        const check = document.createElement("span");
+        check.innerHTML = icon("check", 13);
+        item.appendChild(check);
+      }
+      item.addEventListener("click", async () => {
+        pop.classList.remove("open");
+        if (isCurrent) return;
+        try {
+          await apiSend("PATCH", `/bots/${botName}`, { provider, model });
+          toast(`Model set to ${model}`);
+          await refreshRoster();
+        } catch (err2) {
+          toast("Failed: " + err2.message);
+        }
+      });
+      pop.appendChild(item);
+    });
+  });
+}
+
+document.addEventListener("click", (e) => {
+  if (!e.target.closest("#model-switcher") && !e.target.closest("#chat-header-model")) {
+    document.getElementById("model-switcher").classList.remove("open");
+  }
+});
+
 async function selectBot(name) {
   selected = { kind: "bot", id: name };
+  lastRenderedCount = -1;
   document.body.classList.add("chat-open");
   document.getElementById("routines-pane").classList.remove("open");
   const entry = roster.find((r) => r.name === name);
@@ -578,8 +681,10 @@ async function selectBot(name) {
   showChatView();
   renderRoster();
   await loadMessages();
+  updateComposerState();
+  if (sendingKeys.has(chatKey(selected))) showTypingIndicator();
   clearInterval(messagesPollTimer);
-  messagesPollTimer = setInterval(loadMessages, 5000);
+  messagesPollTimer = setInterval(() => loadMessages(true), 5000);
 }
 
 function backToRoster() {
@@ -591,15 +696,21 @@ function backToRoster() {
 
 function renderMessages(rows, kind) {
   const pane = document.getElementById("messages-pane");
+  // Only messages beyond what the previous render already showed get the
+  // pop-in animation -- rows are rebuilt from scratch on every poll/send,
+  // and re-animating the whole history each time would be noisy, not
+  // "subtle." -1 means this is a fresh thread open: show it instantly.
+  const animateFrom = lastRenderedCount === -1 ? Infinity : lastRenderedCount;
   pane.innerHTML = "";
   if (!rows.length) {
     const empty = document.createElement("div");
     empty.className = "msg system";
     empty.textContent = "No messages yet -- say hi!";
     pane.appendChild(empty);
+    lastRenderedCount = 0;
     return;
   }
-  rows.forEach((row) => {
+  rows.forEach((row, i) => {
     const div = document.createElement("div");
     if (kind === "bot") {
       const isUser = row.role === "user";
@@ -618,8 +729,34 @@ function renderMessages(rows, kind) {
       textNode.textContent = row.text;
       div.appendChild(textNode);
     }
+    if (i >= animateFrom) div.classList.add("msg-pop");
     pane.appendChild(div);
   });
+  lastRenderedCount = rows.length;
+  pane.scrollTop = pane.scrollHeight;
+}
+
+function showTypingIndicator() {
+  const pane = document.getElementById("messages-pane");
+  const el = document.createElement("div");
+  el.id = "typing-indicator";
+  el.className = "msg bot typing-dots msg-pop";
+  el.innerHTML = "<span></span><span></span><span></span>";
+  pane.appendChild(el);
+  pane.scrollTop = pane.scrollHeight;
+}
+
+function hideTypingIndicator() {
+  document.getElementById("typing-indicator")?.remove();
+}
+
+function appendOptimisticUserMessage(text) {
+  const pane = document.getElementById("messages-pane");
+  const div = document.createElement("div");
+  div.id = "optimistic-user-msg";
+  div.className = "msg user msg-pop";
+  div.textContent = text;
+  pane.appendChild(div);
   pane.scrollTop = pane.scrollHeight;
 }
 
@@ -631,8 +768,13 @@ function extractText(row) {
   return row.text || "";
 }
 
-async function loadMessages() {
+async function loadMessages(fromPoll = false) {
   if (!selected) return;
+  // A background poll firing mid-send would rebuild the pane from
+  // server state that doesn't have the in-flight message yet, wiping the
+  // optimistic bubble until the real round trip finishes. Only the
+  // deliberate post-send call (fromPoll=false) is allowed to run then.
+  if (fromPoll && sendingKeys.has(chatKey(selected))) return;
   try {
     if (selected.kind === "bot") {
       const rows = await apiGet(`/bots/${selected.id}/messages`);
@@ -656,27 +798,46 @@ document.getElementById("composer-input").addEventListener("keydown", (e) => {
 });
 
 async function sendComposerMessage() {
-  if (sending || !selected) return;
+  // Snapshot which chat this send is actually for -- the user may switch
+  // to a different bot before the reply comes back, and every UI effect
+  // below (optimistic bubble, typing indicator, error toast, message
+  // reload) must apply to THIS chat, not whatever happens to be selected
+  // when the response lands.
+  const target = selected;
+  const key = chatKey(target);
+  if (!target || sendingKeys.has(key)) return;
   const input = document.getElementById("composer-input");
   const text = input.value.trim();
   if (!text) return;
-  sending = true;
-  document.getElementById("send-btn").disabled = true;
+  sendingKeys.add(key);
+  const isStillActive = () => chatKey(selected) === key;
   input.value = "";
+  updateComposerState();
+  // Show the user's own message the instant they hit send, rather than
+  // waiting on the full round trip (bot reply, possibly a corruption
+  // retry on top of that) before it appears at all. Safe unconditionally
+  // here -- target is always the active chat at this exact point, the
+  // switch-away case only matters once we're past the await below.
+  appendOptimisticUserMessage(text);
+  showTypingIndicator();
   try {
-    if (selected.kind === "bot") {
-      await apiSend("POST", `/bots/${selected.id}/messages`, { text });
+    if (target.kind === "bot") {
+      await apiSend("POST", `/bots/${target.id}/messages`, { text });
     } else {
-      await apiSend("POST", `/groups/${selected.id}/messages`, { text, sender: "user" });
+      await apiSend("POST", `/groups/${target.id}/messages`, { text, sender: "user" });
     }
-    await loadMessages();
+    if (isStillActive()) await loadMessages();
     await refreshRoster();
   } catch (e) {
-    toast("Send failed: " + e.message);
-    input.value = text;
+    if (isStillActive()) {
+      hideTypingIndicator();
+      document.getElementById("optimistic-user-msg")?.remove();
+      input.value = text;
+    }
+    toast(`Send to ${target.id} failed: ` + e.message);
   } finally {
-    sending = false;
-    document.getElementById("send-btn").disabled = false;
+    sendingKeys.delete(key);
+    updateComposerState();
   }
 }
 
@@ -780,6 +941,7 @@ async function refreshGroups() {
 
 async function selectGroup(id) {
   selected = { kind: "group", id };
+  lastRenderedCount = -1;
   document.body.classList.add("chat-open");
   document.getElementById("routines-pane").classList.remove("open");
   const group = groups.find((g) => g.id === id);
@@ -792,8 +954,10 @@ async function selectGroup(id) {
   showChatView();
   renderRoster();
   await loadMessages();
+  updateComposerState();
+  if (sendingKeys.has(chatKey(selected))) showTypingIndicator();
   clearInterval(messagesPollTimer);
-  messagesPollTimer = setInterval(loadMessages, 5000);
+  messagesPollTimer = setInterval(() => loadMessages(true), 5000);
 }
 
 document.getElementById("groups-btn").addEventListener("click", openGroupsModal);

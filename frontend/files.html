@@ -16,6 +16,7 @@
             <h1>Files</h1>
             <p id="files-path"></p>
           </div>
+          <button id="new-folder-btn" class="btn btn-icon-label"></button>
         </div>
         <div class="page-body">
           <table class="data-table">
@@ -23,6 +24,33 @@
             <tbody id="files-body"></tbody>
           </table>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="new-folder-modal-backdrop">
+    <div class="modal">
+      <h2>New folder</h2>
+      <form id="new-folder-form">
+        <div class="field">
+          <label for="new-folder-name">Name</label>
+          <input id="new-folder-name" type="text" required />
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn" id="new-folder-cancel">Cancel</button>
+          <button type="submit" class="btn primary">Create</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="viewer-modal-backdrop">
+    <div class="modal modal-wide">
+      <h2 id="viewer-title"></h2>
+      <pre id="viewer-body" class="viewer-body"></pre>
+      <div class="modal-actions">
+        <a id="viewer-download" class="btn" style="display:none;">Download</a>
+        <button type="button" class="btn primary" id="viewer-close">Close</button>
       </div>
     </div>
   </div>
