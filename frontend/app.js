@@ -780,7 +780,16 @@ function appendStreamingBotMessage() {
 // fixable here) -- from this function's point of view that just looks
 // like one big delta instead of many small ones, no special-casing needed
 // on this end.
-async function streamBotReply(botName, text) {
+async function streamBotReply(botName, text, isStillActive) {
+  // Real bug found live: without the isStillActive gate below, a delta
+  // arriving after the user switched to a DIFFERENT chat would call
+  // appendStreamingBotMessage() against whatever #messages-pane currently
+  // shows -- i.e. bot A's reply visibly streaming into bot B's window.
+  // The old blocking send never had this problem because it never touched
+  // the DOM until the final, already-gated loadMessages() call. The fetch
+  // itself is never aborted on a switch-away -- the reply still needs to
+  // reach the server and land in bot A's real session; only the DOM
+  // writes are suppressed once the user has moved on.
   const res = await fetch(`${API}/bots/${botName}/messages/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -820,7 +829,7 @@ async function streamBotReply(botName, text) {
       } catch (_) {
         continue;
       }
-      if (eventName === "assistant.delta" && payload.delta) {
+      if (eventName === "assistant.delta" && payload.delta && isStillActive()) {
         if (!sawDelta) {
           hideTypingIndicator();
           bubble = appendStreamingBotMessage();
@@ -896,7 +905,7 @@ async function sendComposerMessage() {
   showTypingIndicator();
   try {
     if (target.kind === "bot") {
-      await streamBotReply(target.id, text);
+      await streamBotReply(target.id, text, isStillActive);
     } else {
       await apiSend("POST", `/groups/${target.id}/messages`, { text, sender: "user" });
     }
