@@ -33,6 +33,7 @@ from typing import Any, Optional
 import httpx
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 DASHBOARD_BASE = "http://127.0.0.1:9119"
@@ -391,6 +392,89 @@ async def send_to_bot(profile: str, message: str, *, timeout: float = 300.0) -> 
         return reply
 
 
+async def stream_to_bot(profile: str, message: str):
+    """SSE-forwarding variant of send_to_bot() for the interactive chat UI.
+
+    Real gap this closes: the desktop app feels "blazing fast" because it
+    hits Hermes' own POST /api/sessions/{id}/chat/stream (SSE, deltas as
+    the model generates them) -- this backend only ever called the plain
+    POST .../chat, which blocks until the ENTIRE reply is generated
+    server-side before returning anything, so every message felt like a
+    dead wait regardless of actual model speed. This proxies the same
+    stream Hermes already produces straight through to the frontend
+    (event: assistant.delta carries incremental text; event: run.completed
+    marks the end) rather than re-parsing/re-framing it -- the frontend
+    only needs to care about those two event names, everything else it
+    doesn't recognize is harmless to ignore.
+
+    Only the 500-rollover self-heal from send_to_bot() applies here (retried
+    before any bytes reach the client, so still invisible) -- the
+    corruption-retry can't: by the time a corrupted reply would be
+    detectable (after assistant.completed), the client has already rendered
+    the corrupted deltas live. That retry stays send_to_bot()-only, used by
+    callers that need one clean final string (group chat, supervisor tools,
+    routines), not a live-typing UI turn.
+
+    Real upstream bug found live, not hypothetical: Hermes' own
+    /chat/stream fails to resolve ANY provider through the /p/<profile>/
+    multiplex mirror -- which is every bot here except "default" -- always
+    responding with an in-stream `event: error` ("No LLM provider
+    configured"), even passing an explicit model/provider in the request
+    body. Confirmed NOT a multiplex-general issue: the exact same request
+    against the default/non-multiplexed profile streams real deltas with
+    correctly-resolved runtime.provider/model. This is inside Hermes' own
+    gateway, not fixable from here. Falls back to the working non-streaming
+    path (send_to_bot()) rather than surfacing a broken turn to the user --
+    synthesizes one big "delta" with the full reply, so the frontend still
+    gets a real answer, just without live per-token deltas for affected
+    bots, exactly today's pre-streaming behavior. Only falls back if the
+    error arrives before any real delta was already sent (a failure after
+    that point is a genuinely different problem, not this one, and gets
+    forwarded as-is for the frontend/loadMessages() reconciliation to
+    handle same as any other mid-turn failure).
+    """
+    base = _bot_base(profile)
+    async with httpx.AsyncClient(timeout=300) as client:
+        session_id, all_sessions = await _ensure_bot_chat_session(client, base, profile)
+        rolled_over = False
+        saw_delta = False
+        while True:
+            async with client.stream(
+                "POST", f"{base}/api/sessions/{session_id}/chat/stream",
+                json={"message": message}, headers=_api_headers(),
+            ) as r:
+                if r.status_code == 500 and not rolled_over:
+                    rolled_over = True
+                    session_id = await _roll_over_bot_session(client, base, profile, all_sessions)
+                    continue
+                if r.status_code >= 400:
+                    body = await r.aread()
+                    raise HTTPException(status_code=r.status_code, detail=body[:500].decode(errors="replace"))
+
+                event_name = None
+                event_lines: list[str] = []
+                async for line in r.aiter_lines():
+                    if line.startswith("event:"):
+                        event_name = line.split(":", 1)[1].strip()
+                        event_lines = [line]
+                        continue
+                    event_lines.append(line)
+                    if line != "":
+                        continue
+                    # blank line = end of this SSE event
+                    if event_name == "error" and not saw_delta:
+                        reply = await send_to_bot(profile, message)
+                        yield "event: assistant.delta\n" + f"data: {json.dumps({'delta': reply})}\n\n"
+                        yield "event: run.completed\n" + f"data: {json.dumps({'completed': True})}\n\n"
+                        return
+                    if event_name == "assistant.delta":
+                        saw_delta = True
+                    for eline in event_lines:
+                        yield eline + "\n"
+                    event_name, event_lines = None, []
+                return
+
+
 async def get_bot_activity(profile: str) -> dict:
     """This bot's own most-recent session summary for the roster (preview/
     timestamp/active) -- across its whole session family (see
@@ -742,6 +826,15 @@ async def bot_send(name: str, body: SendMessage) -> dict:
         raise HTTPException(status_code=400, detail="Message text required.")
     reply = await send_to_bot(name, text)
     return {"reply": reply}
+
+
+@app.post("/bots/{name}/messages/stream")
+async def bot_send_stream(name: str, body: SendMessage) -> StreamingResponse:
+    name = _validate_name(name)
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Message text required.")
+    return StreamingResponse(stream_to_bot(name, text), media_type="text/event-stream")
 
 
 # --------------------------------------------------------------------------
