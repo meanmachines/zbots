@@ -74,7 +74,14 @@ async def message_bot(name: str, message: str) -> str:
     """Send a message to another bot's own canonical session and return its
     real reply. This is a genuine conversation turn for that bot -- it sees
     the message as if a user/peer sent it, and its reply becomes part of
-    its own conversation history, exactly like 'hermes peer dm' does."""
+    its own conversation history, exactly like 'hermes peer dm' does.
+
+    Phrase status checks specifically, or you will get a generic
+    self-introduction instead of a real answer -- the model has no reason
+    to volunteer its actual current task/status unless directly asked for
+    it. Bad: 'what do you do' (invites a capabilities blurb). Good:
+    'What are you working on right now? Give me your current status and
+    last completed task, not a general introduction.'"""
     async with httpx.AsyncClient(timeout=300) as client:
         r = await client.post(f"{BOTS_UI_BASE}/bots/{name}/messages", json={"text": message})
         r.raise_for_status()
