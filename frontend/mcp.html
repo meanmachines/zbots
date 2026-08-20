@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MCP Servers - Hermes</title>
+  <link rel="stylesheet" href="/bots/styles.css" />
+</head>
+<body>
+  <div id="shell">
+    <nav id="shell-nav"></nav>
+    <div id="shell-page">
+      <div class="page">
+        <div class="page-header">
+          <div>
+            <h1>MCP Servers</h1>
+            <p>Model Context Protocol tool servers available to every bot.</p>
+          </div>
+          <button id="add-mcp-btn" class="btn primary btn-icon-label"></button>
+        </div>
+        <div class="page-body">
+          <div id="mcp-list" class="loading-hint">Loading...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="mcp-modal-backdrop">
+    <div class="modal">
+      <h2>Add MCP server</h2>
+      <form id="mcp-form">
+        <div class="field">
+          <label for="mcp-name">Name</label>
+          <input id="mcp-name" type="text" required />
+        </div>
+        <div class="field">
+          <label for="mcp-transport">Transport</label>
+          <select id="mcp-transport">
+            <option value="http">HTTP (URL)</option>
+            <option value="stdio">stdio (command)</option>
+          </select>
+        </div>
+        <div class="field" id="mcp-url-field">
+          <label for="mcp-url">URL</label>
+          <input id="mcp-url" type="text" placeholder="https://example.com/mcp" />
+        </div>
+        <div class="field" id="mcp-command-field" style="display:none;">
+          <label for="mcp-command">Command</label>
+          <input id="mcp-command" type="text" placeholder="npx some-mcp-server" />
+        </div>
+        <div class="field">
+          <label for="mcp-auth">Auth</label>
+          <select id="mcp-auth">
+            <option value="">None</option>
+            <option value="header">Bearer token</option>
+            <option value="oauth">OAuth</option>
+          </select>
+        </div>
+        <div class="field" id="mcp-token-field" style="display:none;">
+          <label for="mcp-token">Bearer token</label>
+          <input id="mcp-token" type="password" />
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn" id="mcp-modal-cancel">Cancel</button>
+          <button type="submit" class="btn primary">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+
+  <script src="/bots/icons.js"></script>
+  <script src="/bots/shell.js"></script>
+  <script src="/bots/common.js"></script>
+  <script src="/bots/mcp.js"></script>
+</body>
+</html>

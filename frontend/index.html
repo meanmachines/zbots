@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bots — Hermes</title>
+  <link rel="stylesheet" href="/bots/styles.css" />
+</head>
+<body>
+  <div id="shell">
+    <nav id="shell-nav"></nav>
+    <div id="shell-page">
+  <div id="app">
+    <aside id="sidebar">
+      <div id="sidebar-header">
+        <h1>Bots</h1>
+        <div style="display:flex; gap:0.4rem;">
+          <button id="show-hidden-btn" class="icon-btn" title="Show hidden bots"></button>
+          <button id="groups-btn" class="icon-btn" title="Group chats"></button>
+        </div>
+      </div>
+      <div id="search-row">
+        <input id="search-input" type="text" placeholder="Search bots" />
+        <button id="new-bot-btn" class="btn-icon-label" title="Create bot"></button>
+      </div>
+      <div id="roster-list"></div>
+    </aside>
+
+    <main id="main">
+      <div id="main-empty">
+        <div id="main-empty-icon"></div>
+        <div>Select a bot to start chatting, or create a new one.</div>
+      </div>
+
+      <div id="chat-view">
+        <div id="chat-header">
+          <div id="chat-header-info">
+            <button id="chat-back-btn" class="icon-btn" title="Back to bots"></button>
+            <div id="chat-header-avatar" class="avatar"></div>
+            <div id="chat-header-text">
+              <div id="chat-header-title-row">
+                <span id="chat-header-title"></span>
+                <span id="chat-header-model" class="pill"></span>
+              </div>
+              <div id="chat-header-desc"></div>
+            </div>
+          </div>
+          <div id="chat-header-actions">
+            <button id="routines-toggle-btn" class="icon-btn" title="Routines"></button>
+            <button id="chat-menu-btn" class="icon-btn" title="Manage bot"></button>
+          </div>
+        </div>
+        <div id="chat-body">
+          <div id="messages-pane"></div>
+          <aside id="routines-pane">
+            <div id="routines-header">
+              <h2>Routines</h2>
+              <button id="routines-close-btn" class="icon-btn" title="Close"></button>
+            </div>
+            <div id="routines-list"></div>
+            <form id="add-routine-form">
+              <input id="routine-name" type="text" placeholder="Routine label (e.g. daily-digest)" required />
+              <textarea id="routine-prompt" placeholder="What should this run do?" required></textarea>
+              <input id="routine-schedule" type="text" placeholder="Schedule (e.g. 0 9 * * *)" required />
+              <button type="submit" class="btn primary">Add routine</button>
+            </form>
+          </aside>
+        </div>
+        <div id="composer-row">
+          <textarea id="composer-input" placeholder="Message this bot (use @name in a group chat)"></textarea>
+          <button id="send-btn" class="btn-icon-label">Send</button>
+        </div>
+      </div>
+    </main>
+  </div>
+    </div>
+  </div>
+
+  <!-- Create / Edit bot modal -->
+  <div class="modal-backdrop" id="bot-modal-backdrop">
+    <div class="modal">
+      <h2 id="bot-modal-title">New bot</h2>
+      <form id="bot-form">
+        <div class="field">
+          <label for="bot-name">Name (id, lowercase, no spaces)</label>
+          <input id="bot-name" type="text" pattern="[a-z0-9][a-z0-9_-]*" required />
+        </div>
+        <div class="field">
+          <label for="bot-title">Title</label>
+          <input id="bot-title" type="text" placeholder="Display name shown in the roster" />
+        </div>
+        <div class="field">
+          <label for="bot-description">Description</label>
+          <textarea id="bot-description" placeholder="What this bot is good at"></textarea>
+        </div>
+        <details class="advanced">
+          <summary>Advanced</summary>
+          <div class="field">
+            <label for="bot-clone-from">Clone from (optional)</label>
+            <select id="bot-clone-from"><option value="">— start fresh —</option></select>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label for="bot-provider">Provider</label>
+              <select id="bot-provider"><option value="">(inherit default)</option></select>
+            </div>
+            <div class="field">
+              <label for="bot-model">Model</label>
+              <select id="bot-model"><option value="">(inherit default)</option></select>
+            </div>
+          </div>
+          <div class="field">
+            <label for="bot-soul">SOUL.md (persona &amp; instructions)</label>
+            <textarea id="bot-soul" placeholder="Leave blank to use the default persona"></textarea>
+          </div>
+          <div class="checkbox-field">
+            <input id="bot-no-skills" type="checkbox" />
+            <label for="bot-no-skills" style="margin:0;">Start with no bundled skills</label>
+          </div>
+        </details>
+        <div class="modal-actions">
+          <button type="button" class="btn" id="bot-modal-cancel">Cancel</button>
+          <button type="submit" class="btn primary" id="bot-modal-submit">Create bot</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Duplicate modal -->
+  <div class="modal-backdrop" id="dup-modal-backdrop">
+    <div class="modal">
+      <h2>Duplicate bot</h2>
+      <form id="dup-form">
+        <div class="field">
+          <label for="dup-name">New bot name</label>
+          <input id="dup-name" type="text" pattern="[a-z0-9][a-z0-9_-]*" required />
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn" id="dup-modal-cancel">Cancel</button>
+          <button type="submit" class="btn primary">Duplicate</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Avatar modal -->
+  <div class="modal-backdrop" id="avatar-modal-backdrop">
+    <div class="modal">
+      <h2>Choose avatar</h2>
+      <div id="avatar-options" style="display:flex; gap:0.75rem; flex-wrap:wrap; margin-bottom:1rem;"></div>
+      <div class="field">
+        <label for="avatar-upload">Or upload an image</label>
+        <input id="avatar-upload" type="file" accept="image/*" />
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn" id="avatar-modal-cancel">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Groups modal -->
+  <div class="modal-backdrop" id="groups-modal-backdrop">
+    <div class="modal">
+      <h2>Group chats</h2>
+      <div id="groups-existing" style="margin-bottom:1rem;"></div>
+      <details class="advanced" open>
+        <summary>New group</summary>
+        <div class="field">
+          <label for="group-name">Group name</label>
+          <input id="group-name" type="text" />
+        </div>
+        <div class="field">
+          <label>Members</label>
+          <div id="group-member-checks"></div>
+        </div>
+        <button type="button" class="btn primary" id="create-group-btn">Create group</button>
+      </details>
+      <div class="modal-actions">
+        <button type="button" class="btn" id="groups-modal-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="context-menu"></div>
+  <div id="toast"></div>
+
+  <script src="/bots/icons.js"></script>
+  <script src="/bots/shell.js"></script>
+  <script src="/bots/app.js"></script>
+</body>
+</html>

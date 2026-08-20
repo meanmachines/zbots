@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Config - Hermes</title>
+  <link rel="stylesheet" href="/bots/styles.css" />
+</head>
+<body>
+  <div id="shell">
+    <nav id="shell-nav"></nav>
+    <div id="shell-page">
+      <div class="page">
+        <div class="page-header">
+          <div>
+            <h1>Config</h1>
+            <p id="config-path"></p>
+          </div>
+          <button id="save-config-btn" class="btn primary btn-icon-label"></button>
+        </div>
+        <div class="page-body" style="display:flex; flex-direction:column;">
+          <div style="font-size:0.8rem; color:var(--text-muted); margin-bottom:0.75rem;">
+            This is the raw config.yaml for the default profile. Providers, models,
+            bots, and everything else live in this one file -- an invalid edit can
+            break the gateway. Model/provider changes are safer to make from the
+            Models page.
+          </div>
+          <textarea id="config-editor" style="flex:1; min-height:60vh; font-family:ui-monospace,monospace; font-size:0.82rem; resize:vertical;" spellcheck="false"></textarea>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+
+  <script src="/bots/icons.js"></script>
+  <script src="/bots/shell.js"></script>
+  <script src="/bots/common.js"></script>
+  <script src="/bots/config.js"></script>
+</body>
+</html>

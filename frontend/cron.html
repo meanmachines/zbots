@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Routines - Hermes</title>
+  <link rel="stylesheet" href="/bots/styles.css" />
+</head>
+<body>
+  <div id="shell">
+    <nav id="shell-nav"></nav>
+    <div id="shell-page">
+      <div class="page">
+        <div class="page-header">
+          <div>
+            <h1>Routines</h1>
+            <p>All scheduled jobs across every profile. Bot-specific routines also show here.</p>
+          </div>
+          <button id="add-cron-btn" class="btn primary btn-icon-label"></button>
+        </div>
+        <div class="page-body">
+          <div id="cron-list" class="loading-hint">Loading...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="cron-modal-backdrop">
+    <div class="modal">
+      <h2>New routine</h2>
+      <form id="cron-form">
+        <div class="field">
+          <label for="cron-name">Name</label>
+          <input id="cron-name" type="text" required />
+        </div>
+        <div class="field">
+          <label for="cron-prompt">Prompt</label>
+          <textarea id="cron-prompt" required></textarea>
+        </div>
+        <div class="field">
+          <label for="cron-schedule">Schedule (cron expression)</label>
+          <input id="cron-schedule" type="text" placeholder="0 9 * * *" required />
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn" id="cron-modal-cancel">Cancel</button>
+          <button type="submit" class="btn primary">Create</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+
+  <script src="/bots/icons.js"></script>
+  <script src="/bots/shell.js"></script>
+  <script src="/bots/common.js"></script>
+  <script src="/bots/cron.js"></script>
+</body>
+</html>

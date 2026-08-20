@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Skills - Hermes</title>
+  <link rel="stylesheet" href="/bots/styles.css" />
+</head>
+<body>
+  <div id="shell">
+    <nav id="shell-nav"></nav>
+    <div id="shell-page">
+      <div class="page">
+        <div class="page-header">
+          <div>
+            <h1>Skills</h1>
+            <p>Bundled and custom skills available to the agent.</p>
+          </div>
+          <input id="skills-search" type="text" placeholder="Search skills" style="width:220px;" />
+        </div>
+        <div class="page-body">
+          <table class="data-table">
+            <thead>
+              <tr><th>Name</th><th>Category</th><th>Description</th><th></th></tr>
+            </thead>
+            <tbody id="skills-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+
+  <script src="/bots/icons.js"></script>
+  <script src="/bots/shell.js"></script>
+  <script src="/bots/common.js"></script>
+  <script src="/bots/skills.js"></script>
+</body>
+</html>

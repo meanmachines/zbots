@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Models - Hermes</title>
+  <link rel="stylesheet" href="/bots/styles.css" />
+</head>
+<body>
+  <div id="shell">
+    <nav id="shell-nav"></nav>
+    <div id="shell-page">
+      <div class="page">
+        <div class="page-header">
+          <div>
+            <h1>Models &amp; Providers</h1>
+            <p>Configure OpenAI-compatible endpoints and choose the active model.</p>
+          </div>
+          <button id="add-provider-btn" class="btn primary btn-icon-label"></button>
+        </div>
+        <div class="page-body">
+          <div id="providers-list" class="loading-hint">Loading providers...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add / edit provider modal -->
+  <div class="modal-backdrop" id="provider-modal-backdrop">
+    <div class="modal">
+      <h2 id="provider-modal-title">Add provider</h2>
+      <form id="provider-form">
+        <div class="field">
+          <label for="provider-id">Provider ID</label>
+          <input id="provider-id" type="text" pattern="[a-z0-9][a-z0-9_-]*" placeholder="e.g. my-ollama" required />
+        </div>
+        <div class="field">
+          <label for="provider-name">Display name</label>
+          <input id="provider-name" type="text" placeholder="Optional -- defaults to the ID" />
+        </div>
+        <div class="field">
+          <label for="provider-base-url">Base URL (OpenAI-compatible)</label>
+          <input id="provider-base-url" type="text" placeholder="http://host:port/v1" required />
+        </div>
+        <div class="field">
+          <label for="provider-model">Primary model</label>
+          <input id="provider-model" type="text" placeholder="e.g. llama3:latest" required />
+        </div>
+        <div class="field">
+          <label for="provider-api-key">API key</label>
+          <input id="provider-api-key" type="password" placeholder="Leave blank if the endpoint needs none" />
+        </div>
+        <div class="checkbox-field">
+          <input id="provider-discover" type="checkbox" checked />
+          <label for="provider-discover" style="margin:0;">Discover additional models from this endpoint</label>
+        </div>
+        <div class="checkbox-field">
+          <input id="provider-make-default" type="checkbox" />
+          <label for="provider-make-default" style="margin:0;">Make this the active provider</label>
+        </div>
+        <div id="provider-validate-result" style="font-size:0.8rem; margin-bottom:0.75rem;"></div>
+        <div class="modal-actions">
+          <button type="button" class="btn" id="provider-validate-btn">Test connection</button>
+          <button type="button" class="btn" id="provider-modal-cancel">Cancel</button>
+          <button type="submit" class="btn primary">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+
+  <script src="/bots/icons.js"></script>
+  <script src="/bots/shell.js"></script>
+  <script src="/bots/models.js"></script>
+</body>
+</html>

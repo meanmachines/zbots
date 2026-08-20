@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Webhooks - Hermes</title>
+  <link rel="stylesheet" href="/bots/styles.css" />
+</head>
+<body>
+  <div id="shell">
+    <nav id="shell-nav"></nav>
+    <div id="shell-page">
+      <div class="page">
+        <div class="page-header">
+          <div>
+            <h1>Webhooks</h1>
+            <p id="webhooks-sub"></p>
+          </div>
+          <button id="add-webhook-btn" class="btn primary btn-icon-label"></button>
+        </div>
+        <div class="page-body">
+          <div id="webhooks-list" class="loading-hint">Loading...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="webhook-modal-backdrop">
+    <div class="modal">
+      <h2>New webhook</h2>
+      <form id="webhook-form">
+        <div class="field">
+          <label for="webhook-name">Name</label>
+          <input id="webhook-name" type="text" required />
+        </div>
+        <div class="field">
+          <label for="webhook-description">Description</label>
+          <input id="webhook-description" type="text" />
+        </div>
+        <div class="field">
+          <label for="webhook-prompt">Prompt (run when triggered)</label>
+          <textarea id="webhook-prompt"></textarea>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn" id="webhook-modal-cancel">Cancel</button>
+          <button type="submit" class="btn primary">Create</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+
+  <script src="/bots/icons.js"></script>
+  <script src="/bots/shell.js"></script>
+  <script src="/bots/common.js"></script>
+  <script src="/bots/webhooks.js"></script>
+</body>
+</html>
