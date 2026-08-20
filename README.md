@@ -87,9 +87,10 @@ and tested against.
   browser
 - Hosted/multi-tenant version with per-user accounts and usage-based
   pricing, still fully BYOK for model providers
-- Native chat page (the current "Chat (classic)" link opens Hermes' own
-  dashboard chat -- a from-scratch rebuild is a materially different scope
-  than the admin pages here and hasn't been attempted yet)
+- Native chat page (per-bot chat exists today inside the Bots roster; a
+  standalone general chat page with streaming and tool-call rendering is a
+  materially different scope than the admin pages here and hasn't been
+  attempted yet)
 
 ## License
 

@@ -7,7 +7,6 @@ const NAV_GROUPS = [
   {
     label: "Agent",
     items: [
-      { id: "chat", label: "Chat (classic)", href: "/", icon: "chat" },
       { id: "bots", label: "Bots", href: "/bots/", icon: "bots" },
       { id: "sessions", label: "Sessions", href: "/bots/sessions.html", icon: "sessions" },
       { id: "cron", label: "Routines", href: "/bots/cron.html", icon: "cron" },
