@@ -647,6 +647,28 @@ async def create_bot(body: BotCreate) -> RosterEntry:
         await _mutate_state(lambda d: d["titles"].__setitem__(name, body.title))
     if body.soul:
         await dash_send("PUT", f"/api/profiles/{name}/soul", {"content": body.soul})
+    if provider and model:
+        # Real bug found live: Hermes' own profile-level provider storage
+        # silently coerces any provider name it doesn't recognize as one
+        # of its built-in TYPEs (e.g. this platform's custom OpenAI-
+        # compatible endpoints like "hermes4-bitbots") down to
+        # "openrouter" -- confirmed by creating a bot and reading its
+        # profile back: requested "hermes4-bitbots" landed as
+        # "openrouter", an unconfigured provider with no API key, making
+        # the new bot appear broken/unresponsive despite creation itself
+        # reporting success. The SESSION-level model lock
+        # (POST /api/sessions/{id}/model, same endpoint
+        # _lock_active_session_model() already uses for existing bots)
+        # does NOT have this bug. So give the new bot its own canonical
+        # session immediately and lock the real provider onto it here,
+        # rather than trusting the profile field to hold it correctly.
+        try:
+            base = _bot_base(name)
+            async with httpx.AsyncClient(timeout=15) as client:
+                await _ensure_bot_chat_session(client, base, name)
+            await _lock_active_session_model(name, provider, model)
+        except Exception:
+            pass  # best-effort -- profile creation above already succeeded
     roster = await get_roster(include_hidden=True)
     for entry in roster:
         if entry.name == name:
