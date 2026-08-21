@@ -1251,6 +1251,49 @@ async def set_mcp_server_enabled(name: str, body: ToggleBody) -> dict:
 
 
 # --------------------------------------------------------------------------
+# MCP catalog -- the "Nous-approved" list of known integrations Hermes
+# ships with (GET /api/mcp/catalog, POST /api/mcp/catalog/install), the
+# same one the real desktop app's one-click "Add integration" uses. zBots'
+# own /mcp/servers above is a manual freeform add-a-server form; this is
+# the curated browse-and-click alternative for common tools (GitHub,
+# Notion, Figma, Slack, etc.) without hand-typing transport/URL details.
+# --------------------------------------------------------------------------
+
+@app.get("/mcp/catalog")
+async def get_mcp_catalog() -> Any:
+    return await dash_get("/api/mcp/catalog")
+
+
+class CatalogInstall(BaseModel):
+    name: str
+    env: dict[str, str] = {}
+    enable: bool = True
+
+
+@app.post("/mcp/catalog/install")
+async def install_mcp_catalog(body: CatalogInstall) -> dict:
+    return await dash_send("POST", "/api/mcp/catalog/install", body.model_dump())
+
+
+@app.post("/mcp/servers/{name}/auth")
+async def start_mcp_oauth(name: str) -> dict:
+    """Kicks off OAuth for an already-installed server and returns the
+    authorization_url to open plus a flow_id to poll -- mirrors the real
+    desktop app's inline-card OAuth connect button."""
+    return await dash_send("POST", f"/api/mcp/servers/{name}/auth", None)
+
+
+@app.get("/mcp/oauth/flows/{flow_id}")
+async def get_mcp_oauth_flow(flow_id: str) -> Any:
+    return await dash_get(f"/api/mcp/oauth/flows/{flow_id}")
+
+
+@app.delete("/mcp/oauth/flows/{flow_id}")
+async def cancel_mcp_oauth_flow(flow_id: str) -> dict:
+    return await dash_send("DELETE", f"/api/mcp/oauth/flows/{flow_id}", None)
+
+
+# --------------------------------------------------------------------------
 # Skills
 # --------------------------------------------------------------------------
 
