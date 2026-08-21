@@ -1,10 +1,6 @@
 "use strict";
 
-const API = "/bots-api";
-
-// ---------------------------------------------------------------------
-// State
-// ---------------------------------------------------------------------
+// Shared API/toast helpers live in common.js (loaded before this file).
 
 let roster = [];
 let groups = [];
@@ -26,43 +22,6 @@ function chatKey(sel) {
 function updateComposerState() {
   const btn = document.getElementById("send-btn");
   if (btn) btn.disabled = sendingKeys.has(chatKey(selected));
-}
-
-// ---------------------------------------------------------------------
-// Tiny fetch helpers
-// ---------------------------------------------------------------------
-
-async function api(path, opts) {
-  const res = await fetch(API + path, {
-    headers: { "Content-Type": "application/json" },
-    ...opts,
-  });
-  if (!res.ok) {
-    let detail = res.statusText;
-    try {
-      const body = await res.json();
-      detail = body.detail || detail;
-    } catch (_) {}
-    throw new Error(detail);
-  }
-  if (res.status === 204) return null;
-  const text = await res.text();
-  return text ? JSON.parse(text) : null;
-}
-
-function apiGet(path) {
-  return api(path);
-}
-function apiSend(method, path, body) {
-  return api(path, { method, body: body !== undefined ? JSON.stringify(body) : undefined });
-}
-
-function toast(msg) {
-  const el = document.getElementById("toast");
-  el.textContent = msg;
-  el.classList.add("open");
-  clearTimeout(toast._t);
-  toast._t = setTimeout(() => el.classList.remove("open"), 3200);
 }
 
 // ---------------------------------------------------------------------
@@ -222,7 +181,7 @@ function renderRoster() {
 
 function rosterRow(entry) {
   const row = document.createElement("div");
-  row.className = "roster-row" + (selected && selected.kind === "bot" && selected.id === entry.name ? " selected" : "");
+  row.className = "roster-row" + (selected && selected.kind === "bot" && selected.id === entry.name ? " selected" : "") + (entry.gateway_running === false ? " offline" : "");
   row.appendChild(avatarNode(entry.name, entry.avatar));
 
   const body = document.createElement("div");
@@ -232,6 +191,12 @@ function rosterRow(entry) {
   const title = document.createElement("div");
   title.className = "roster-row-title";
   title.textContent = entry.title;
+  if (entry.gateway_running === false) {
+    const off = document.createElement("span");
+    off.className = "pill off";
+    off.textContent = "offline";
+    title.appendChild(off);
+  }
   const time = document.createElement("div");
   time.className = "roster-row-time";
   time.textContent = timeAgo(entry.last_active);
@@ -583,6 +548,8 @@ function renderChatHeader(entry) {
   avatarSlot.innerHTML = "";
   avatarSlot.appendChild(avatarNode(entry.name, entry.avatar));
   document.getElementById("chat-header-title").textContent = entry.title;
+  const offlineEl = document.getElementById("chat-header-offline");
+  if (offlineEl) offlineEl.style.display = entry.gateway_running === false ? "" : "none";
   const modelEl = document.getElementById("chat-header-model");
   modelEl.textContent = entry.model || "Set model";
   modelEl.style.display = "";
@@ -694,6 +661,14 @@ function backToRoster() {
   renderRoster();
 }
 
+function messageTimestamp(row) {
+  return row.timestamp || row.ts || null;
+}
+
+function messageText(row, kind) {
+  return kind === "bot" ? extractText(row) : row.text || "";
+}
+
 function renderMessages(rows, kind) {
   const pane = document.getElementById("messages-pane");
   // Only messages beyond what the previous render already showed get the
@@ -710,25 +685,56 @@ function renderMessages(rows, kind) {
     lastRenderedCount = 0;
     return;
   }
+  let lastDayKey = null;
   rows.forEach((row, i) => {
-    const div = document.createElement("div");
-    if (kind === "bot") {
-      const isUser = row.role === "user";
-      div.className = "msg " + (isUser ? "user" : "bot");
-      div.textContent = extractText(row);
-    } else {
-      const isUser = row.from === "user";
-      div.className = "msg " + (isUser ? "user" : "bot");
-      if (!isUser) {
-        const label = document.createElement("div");
-        label.className = "msg-from";
-        label.textContent = row.from;
-        div.appendChild(label);
-      }
-      const textNode = document.createElement("div");
-      textNode.textContent = row.text;
-      div.appendChild(textNode);
+    const ts = messageTimestamp(row);
+    const dayKey = ts ? new Date(ts * 1000).toDateString() : null;
+    if (ts && dayKey !== lastDayKey) {
+      const sep = document.createElement("div");
+      sep.className = "msg-day-sep";
+      sep.textContent = dayLabel(ts);
+      pane.appendChild(sep);
+      lastDayKey = dayKey;
+    } else if (!ts) {
+      lastDayKey = null;
     }
+
+    const isUser = kind === "bot" ? row.role === "user" : row.from === "user";
+    const div = document.createElement("div");
+    div.className = "msg " + (isUser ? "user" : "bot");
+    if (kind === "group" && !isUser) {
+      const label = document.createElement("div");
+      label.className = "msg-from";
+      label.textContent = row.from;
+      div.appendChild(label);
+    }
+    const text = messageText(row, kind);
+    const body = document.createElement("div");
+    body.className = "msg-body";
+    body.innerHTML = renderMarkdown(text);
+    div.appendChild(body);
+
+    const meta = document.createElement("div");
+    meta.className = "msg-meta";
+    if (ts) {
+      const time = document.createElement("span");
+      time.className = "msg-time";
+      time.textContent = fmtDateTime(ts);
+      meta.appendChild(time);
+    }
+    const copyBtn = document.createElement("button");
+    copyBtn.className = "msg-copy icon-btn";
+    copyBtn.title = "Copy message";
+    copyBtn.innerHTML = icon("copy", 12);
+    copyBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      copyText(text)
+        .then(() => toast("Copied"))
+        .catch(() => toast("Copy failed"));
+    });
+    meta.appendChild(copyBtn);
+    div.appendChild(meta);
+
     if (i >= animateFrom) div.classList.add("msg-pop");
     pane.appendChild(div);
   });
@@ -755,7 +761,10 @@ function appendOptimisticUserMessage(text) {
   const div = document.createElement("div");
   div.id = "optimistic-user-msg";
   div.className = "msg user msg-pop";
-  div.textContent = text;
+  const body = document.createElement("div");
+  body.className = "msg-body";
+  body.innerHTML = renderMarkdown(text);
+  div.appendChild(body);
   pane.appendChild(div);
   pane.scrollTop = pane.scrollHeight;
 }
@@ -792,7 +801,7 @@ async function streamBotReply(botName, text, isStillActive) {
   // writes are suppressed once the user has moved on.
   const res = await fetch(`${API}/bots/${botName}/messages/stream`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: apiHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ text }),
   });
   if (!res.ok || !res.body) {
@@ -1032,6 +1041,8 @@ async function selectGroup(id) {
   document.getElementById("chat-header-avatar").innerHTML =
     `<svg viewBox="0 0 100 100"><rect width="100" height="100" fill="#111"/><circle cx="38" cy="42" r="22" fill="#f2f2f2"/><circle cx="66" cy="55" r="18" fill="#9a9a9a"/></svg>`;
   document.getElementById("chat-header-title").textContent = group ? group.name : "Group";
+  const offlineEl = document.getElementById("chat-header-offline");
+  if (offlineEl) offlineEl.style.display = "none";
   document.getElementById("chat-header-model").style.display = "none";
   document.getElementById("chat-header-desc").textContent = group ? group.members.join(", ") : "";
   document.getElementById("composer-input").placeholder = "Message the group (@name to address one bot)";
@@ -1062,18 +1073,32 @@ async function openGroupsModal() {
       row.style.justifyContent = "space-between";
       row.style.alignItems = "center";
       row.style.padding = "0.4rem 0";
+      row.style.gap = "0.5rem";
       const label = document.createElement("div");
       label.textContent = `${g.name} (${g.members.join(", ")})`;
       label.style.fontSize = "0.85rem";
+      label.style.flex = "1";
+      const actions = document.createElement("div");
+      actions.style.display = "flex";
+      actions.style.gap = "0.4rem";
+      const edit = document.createElement("button");
+      edit.className = "btn";
+      edit.textContent = "Edit";
+      edit.addEventListener("click", () => {
+        document.getElementById("groups-modal-backdrop").classList.remove("open");
+        openGroupEditModal(g);
+      });
       const del = document.createElement("button");
       del.className = "btn";
       del.textContent = "Delete";
       del.addEventListener("click", async () => {
+        if (!confirm(`Delete group "${g.name}"?`)) return;
         await apiSend("DELETE", `/groups/${g.id}`);
         await openGroupsModal();
         renderRoster();
       });
-      row.append(label, del);
+      actions.append(edit, del);
+      row.append(label, actions);
       existing.appendChild(row);
     });
   }
@@ -1115,6 +1140,128 @@ document.getElementById("create-group-btn").addEventListener("click", async () =
 });
 
 // ---------------------------------------------------------------------
+// Group editing
+// ---------------------------------------------------------------------
+
+let editingGroup = null;
+
+function fillGroupMemberChecks(wrap, selectedMembers) {
+  wrap.innerHTML = "";
+  roster.forEach((r) => {
+    const label = document.createElement("label");
+    label.style.display = "flex";
+    label.style.alignItems = "center";
+    label.style.gap = "0.4rem";
+    label.style.marginBottom = "0.3rem";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.value = r.name;
+    cb.checked = selectedMembers.includes(r.name);
+    label.append(cb, document.createTextNode(r.title));
+    wrap.appendChild(label);
+  });
+}
+
+function openGroupEditModal(group) {
+  editingGroup = group;
+  document.getElementById("group-edit-name").value = group.name || "";
+  fillGroupMemberChecks(document.getElementById("group-edit-member-checks"), group.members || []);
+  document.getElementById("group-edit-modal-backdrop").classList.add("open");
+}
+
+document.getElementById("group-edit-cancel").addEventListener("click", () => {
+  document.getElementById("group-edit-modal-backdrop").classList.remove("open");
+});
+
+document.getElementById("group-edit-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!editingGroup) return;
+  const name = document.getElementById("group-edit-name").value.trim();
+  const members = [...document.querySelectorAll("#group-edit-member-checks input:checked")].map((el) => el.value);
+  if (members.length < 2) {
+    toast("Pick at least 2 members.");
+    return;
+  }
+  try {
+    await apiSend("PATCH", `/groups/${editingGroup.id}`, { name, members });
+    toast("Group updated");
+    document.getElementById("group-edit-modal-backdrop").classList.remove("open");
+    await refreshGroups();
+    renderRoster();
+    if (selected && selected.kind === "group" && selected.id === editingGroup.id) {
+      const updated = groups.find((g) => g.id === editingGroup.id);
+      if (updated) {
+        document.getElementById("chat-header-title").textContent = updated.name;
+        document.getElementById("chat-header-desc").textContent = updated.members.join(", ");
+      }
+    }
+  } catch (err) {
+    toast("Failed: " + err.message);
+  }
+});
+
+document.getElementById("group-edit-delete").addEventListener("click", async () => {
+  if (!editingGroup) return;
+  if (!confirm(`Delete group "${editingGroup.name}"?`)) return;
+  try {
+    await apiSend("DELETE", `/groups/${editingGroup.id}`);
+    document.getElementById("group-edit-modal-backdrop").classList.remove("open");
+    if (selected && selected.kind === "group" && selected.id === editingGroup.id) {
+      selected = null;
+      showEmptyMain();
+    }
+    toast("Group deleted");
+    await refreshGroups();
+    renderRoster();
+  } catch (err) {
+    toast("Failed: " + err.message);
+  }
+});
+
+function openGroupContextMenu(x, y, group) {
+  const menu = document.getElementById("context-menu");
+  menu.innerHTML = "";
+  const items = [
+    { label: "Edit group", action: () => openGroupEditModal(group) },
+    { sep: true },
+    { label: "Delete group", danger: true, action: async () => {
+      if (!confirm(`Delete group "${group.name}"?`)) return;
+      try {
+        await apiSend("DELETE", `/groups/${group.id}`);
+        if (selected && selected.kind === "group" && selected.id === group.id) {
+          selected = null;
+          showEmptyMain();
+        }
+        toast("Group deleted");
+        await refreshGroups();
+        renderRoster();
+      } catch (e) {
+        toast("Failed: " + e.message);
+      }
+    } },
+  ];
+  items.forEach((it) => {
+    if (it.sep) {
+      const sep = document.createElement("div");
+      sep.className = "ctx-sep";
+      menu.appendChild(sep);
+      return;
+    }
+    const div = document.createElement("div");
+    div.className = "ctx-item" + (it.danger ? " danger" : "");
+    div.textContent = it.label;
+    div.addEventListener("click", () => {
+      closeContextMenu();
+      it.action();
+    });
+    menu.appendChild(div);
+  });
+  menu.style.left = x + "px";
+  menu.style.top = y + "px";
+  menu.classList.add("open");
+}
+
+// ---------------------------------------------------------------------
 // Misc wiring
 // ---------------------------------------------------------------------
 
@@ -1131,6 +1278,7 @@ document.getElementById("show-hidden-btn").addEventListener("click", () => {
   ["dup-modal-backdrop", null],
   ["avatar-modal-backdrop", null],
   ["groups-modal-backdrop", null],
+  ["group-edit-modal-backdrop", null],
 ].forEach(([backdropId]) => {
   document.getElementById(backdropId).addEventListener("click", (e) => {
     if (e.target.id === backdropId) e.target.classList.remove("open");
@@ -1140,18 +1288,85 @@ document.getElementById("show-hidden-btn").addEventListener("click", () => {
 document.getElementById("chat-back-btn").addEventListener("click", backToRoster);
 
 document.getElementById("chat-menu-btn").addEventListener("click", (e) => {
-  if (!selected || selected.kind !== "bot") return;
-  const entry = roster.find((r) => r.name === selected.id);
-  if (!entry) return;
+  if (!selected) return;
   const rect = e.currentTarget.getBoundingClientRect();
-  openBotContextMenu(rect.right - 170, rect.bottom + 6, entry);
+  if (selected.kind === "bot") {
+    const entry = roster.find((r) => r.name === selected.id);
+    if (!entry) return;
+    openBotContextMenu(rect.right - 170, rect.bottom + 6, entry);
+  } else {
+    const group = groups.find((g) => g.id === selected.id);
+    if (!group) return;
+    openGroupContextMenu(rect.right - 170, rect.bottom + 6, group);
+  }
 });
+
+// ---------------------------------------------------------------------
+// Retry last / export conversation
+// ---------------------------------------------------------------------
+
+async function retryLastMessage() {
+  if (!selected) return;
+  let rows;
+  try {
+    rows = selected.kind === "bot"
+      ? await apiGet(`/bots/${selected.id}/messages`)
+      : await apiGet(`/groups/${selected.id}/messages`);
+  } catch (e) {
+    toast("Could not load messages to retry: " + e.message);
+    return;
+  }
+  const lastUser = [...(rows || [])].reverse().find((r) => r.role === "user" || r.from === "user");
+  if (!lastUser) {
+    toast("No user message to retry.");
+    return;
+  }
+  const text = selected.kind === "bot" ? extractText(lastUser) : lastUser.text || "";
+  if (!text) return;
+  const input = document.getElementById("composer-input");
+  input.value = text;
+  await sendComposerMessage();
+}
+
+document.getElementById("retry-btn").addEventListener("click", retryLastMessage);
+
+async function exportConversation() {
+  if (!selected) return;
+  const name = selected.kind === "bot"
+    ? (roster.find((r) => r.name === selected.id)?.title || selected.id)
+    : (groups.find((g) => g.id === selected.id)?.name || "group");
+  let rows;
+  try {
+    rows = selected.kind === "bot"
+      ? await apiGet(`/bots/${selected.id}/messages`)
+      : await apiGet(`/groups/${selected.id}/messages`);
+  } catch (e) {
+    toast("Export failed: " + e.message);
+    return;
+  }
+  const lines = [`# ${name}`, ""];
+  (rows || []).forEach((row) => {
+    const who = selected.kind === "bot"
+      ? (row.role === "user" ? "You" : name)
+      : (row.from === "user" ? "You" : row.from);
+    const text = selected.kind === "bot" ? extractText(row) : row.text || "";
+    const ts = row.timestamp || row.ts;
+    const stamp = ts ? new Date(ts * 1000).toISOString() : "";
+    lines.push(`## ${who}${stamp ? ` (${stamp})` : ""}`, "", text, "");
+  });
+  const safeName = name.replace(/[^a-z0-9_-]+/gi, "_");
+  downloadTextFile(`${safeName}.md`, lines.join("\n"), "text/markdown;charset=utf-8");
+}
+
+document.getElementById("export-btn").addEventListener("click", exportConversation);
 
 function populateIcons() {
   document.getElementById("chat-back-btn").innerHTML = icon("back", 16);
   document.getElementById("show-hidden-btn").innerHTML = icon("eye", 16);
   document.getElementById("groups-btn").innerHTML = icon("group", 16);
   document.getElementById("new-bot-btn").innerHTML = icon("plus", 15) + "<span>New</span>";
+  document.getElementById("retry-btn").innerHTML = icon("retry", 16);
+  document.getElementById("export-btn").innerHTML = icon("download", 16);
   document.getElementById("routines-toggle-btn").innerHTML = icon("clock", 16);
   document.getElementById("chat-menu-btn").innerHTML = icon("more", 16);
   document.getElementById("routines-close-btn").innerHTML = icon("close", 15);

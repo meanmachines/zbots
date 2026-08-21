@@ -1,30 +1,5 @@
 "use strict";
 
-const API = "/bots-api";
-
-async function api(path, opts) {
-  const res = await fetch(API + path, { headers: { "Content-Type": "application/json" }, ...opts });
-  if (!res.ok) {
-    let detail = res.statusText;
-    try {
-      detail = (await res.json()).detail || detail;
-    } catch (_) {}
-    throw new Error(detail);
-  }
-  const text = await res.text();
-  return text ? JSON.parse(text) : null;
-}
-const apiGet = (path) => api(path);
-const apiSend = (method, path, body) => api(path, { method, body: body !== undefined ? JSON.stringify(body) : undefined });
-
-function toast(msg) {
-  const el = document.getElementById("toast");
-  el.textContent = msg;
-  el.classList.add("open");
-  clearTimeout(toast._t);
-  toast._t = setTimeout(() => el.classList.remove("open"), 3200);
-}
-
 let providers = [];
 let currentModel = {};
 

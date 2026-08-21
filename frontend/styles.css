@@ -831,3 +831,77 @@ details.advanced summary { cursor: pointer; font-size: 0.82rem; color: var(--tex
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 8px; }
 ::-webkit-scrollbar-thumb:hover { background: #383838; }
+
+/* ---------- Chat messages: markdown, meta, copy ---------- */
+
+.msg { white-space: normal; }
+.msg-body { white-space: normal; word-wrap: break-word; }
+.msg-body p { margin: 0.35rem 0; }
+.msg-body p:first-child { margin-top: 0; }
+.msg-body p:last-child { margin-bottom: 0; }
+.msg-body ul, .msg-body ol { margin: 0.4rem 0; padding-left: 1.4rem; }
+.msg-body li { margin: 0.15rem 0; }
+.msg-body blockquote {
+  margin: 0.4rem 0;
+  padding: 0.1rem 0 0.1rem 0.8rem;
+  border-left: 3px solid var(--border);
+  color: var(--text-muted);
+}
+.msg-body a { color: var(--primary); }
+.msg-body code {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 0.3rem;
+  padding: 0.05rem 0.3rem;
+  font-family: ui-monospace, monospace;
+  font-size: 0.85em;
+}
+.msg-body pre {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  padding: 0.6rem 0.8rem;
+  overflow-x: auto;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  margin: 0.4rem 0;
+}
+.msg-body pre code { background: transparent; border: none; padding: 0; font-size: 0.82rem; }
+.msg-body h1, .msg-body h2, .msg-body h3 { margin: 0.5rem 0 0.3rem; line-height: 1.25; }
+
+.msg-day-sep {
+  align-self: center;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin: 0.7rem 0;
+  background: var(--card);
+  border: 1px solid var(--border);
+  padding: 0.2rem 0.7rem;
+  border-radius: 1rem;
+}
+.msg-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  opacity: 0;
+  transition: opacity 0.15s;
+  margin-top: 0.2rem;
+}
+.msg:hover .msg-meta, .msg-meta:focus-within { opacity: 1; }
+.msg-time { font-size: 0.68rem; color: var(--text-muted); }
+.msg-copy {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ---------- Offline bots ---------- */
+
+.roster-row.offline .avatar { opacity: 0.55; }
+.roster-row.offline .roster-row-title { color: var(--text-muted); }
+.roster-row-title .pill { margin-left: 0.4rem; font-size: 0.62rem; vertical-align: middle; }
+#chat-header-offline { margin-left: 0.4rem; font-size: 0.66rem; vertical-align: middle; }
+

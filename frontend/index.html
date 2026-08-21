@@ -41,12 +41,15 @@
             <div id="chat-header-text">
               <div id="chat-header-title-row">
                 <span id="chat-header-title"></span>
+                <span id="chat-header-offline" class="pill off" style="display:none;">Offline</span>
                 <span id="chat-header-model" class="pill"></span>
               </div>
               <div id="chat-header-desc"></div>
             </div>
           </div>
           <div id="chat-header-actions">
+            <button id="retry-btn" class="icon-btn" title="Retry last message"></button>
+            <button id="export-btn" class="icon-btn" title="Export conversation"></button>
             <button id="routines-toggle-btn" class="icon-btn" title="Routines"></button>
             <button id="chat-menu-btn" class="icon-btn" title="Manage bot"></button>
           </div>
@@ -182,12 +185,37 @@
     </div>
   </div>
 
+  <!-- Edit group modal -->
+  <div class="modal-backdrop" id="group-edit-modal-backdrop">
+    <div class="modal">
+      <h2>Edit group</h2>
+      <form id="group-edit-form">
+        <div class="field">
+          <label for="group-edit-name">Group name</label>
+          <input id="group-edit-name" type="text" />
+        </div>
+        <div class="field">
+          <label>Members</label>
+          <div id="group-edit-member-checks"></div>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn danger" id="group-edit-delete">Delete group</button>
+          <span style="flex:1;"></span>
+          <button type="button" class="btn" id="group-edit-cancel">Cancel</button>
+          <button type="submit" class="btn primary">Save changes</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <div id="context-menu"></div>
   <div id="model-switcher" class="popover"></div>
   <div id="toast"></div>
 
   <script src="/bots/icons.js"></script>
   <script src="/bots/shell.js"></script>
+  <script src="/bots/common.js"></script>
+  <script src="/bots/markdown.js"></script>
   <script src="/bots/app.js"></script>
 </body>
 </html>
