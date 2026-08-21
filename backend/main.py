@@ -72,7 +72,15 @@ _state_lock = asyncio.Lock()
 # --------------------------------------------------------------------------
 
 def _default_state() -> dict[str, Any]:
-    return {"hidden": [], "avatars": {}, "groups": {}, "titles": {}, "active_sessions": {}}
+    return {
+        "hidden": [], "avatars": {}, "groups": {}, "titles": {}, "active_sessions": {},
+        # What we actually session-locked for a bot (see
+        # _lock_active_session_model's docstring for why Hermes' own
+        # profile-level provider field can't be trusted for custom
+        # providers) -- the roster prefers this over the profile's own
+        # value when present, since it's the one guaranteed correct.
+        "locked_models": {},
+    }
 
 
 def _read_state() -> dict[str, Any]:
@@ -89,6 +97,7 @@ def _read_state() -> dict[str, Any]:
     data.setdefault("groups", {})
     data.setdefault("titles", {})
     data.setdefault("active_sessions", {})
+    data.setdefault("locked_models", {})
     return data
 
 
@@ -563,6 +572,7 @@ async def get_roster(include_hidden: bool = False) -> list[RosterEntry]:
     hidden = set(state.get("hidden") or [])
     avatars = state.get("avatars") or {}
     titles = state.get("titles") or {}
+    locked_models = state.get("locked_models") or {}
 
     visible = [p for p in profiles if p.get("name") and (include_hidden or p["name"] not in hidden)]
     activity = await asyncio.gather(*(get_bot_activity(p["name"]) for p in visible))
@@ -570,13 +580,18 @@ async def get_roster(include_hidden: bool = False) -> list[RosterEntry]:
     entries: list[RosterEntry] = []
     for p, latest in zip(visible, activity):
         name = p["name"]
+        # Prefer what we actually session-locked (see
+        # _lock_active_session_model's docstring) over Hermes' own
+        # profile-level provider field, which silently mangles any
+        # provider name it doesn't recognize as a built-in type.
+        locked = locked_models.get(name) or {}
         entries.append(
             RosterEntry(
                 name=name,
                 title=p.get("display_name") or titles.get(name) or _pretty_title(name),
                 description=p.get("description") or "",
-                model=p.get("model"),
-                provider=p.get("provider"),
+                model=locked.get("model") or p.get("model"),
+                provider=locked.get("provider") or p.get("provider"),
                 gateway_running=bool(p.get("gateway_running")),
                 is_active=bool(latest.get("is_active")),
                 is_hidden=name in hidden,
@@ -729,6 +744,16 @@ async def _lock_active_session_model(profile: str, provider: str, model: str) ->
     looking at, not just the next one. Best-effort: the profile default
     above has already been saved either way, so a failure here (e.g. no
     session yet) shouldn't fail the whole request.
+
+    Also records (provider, model) into state["locked_models"][profile] on
+    success -- real bug found live: Hermes' PROFILE-level provider field
+    silently coerces any provider name it doesn't recognize as a built-in
+    TYPE (e.g. this platform's custom OpenAI-compatible endpoints like
+    "hermes4-bitbots") down to "openrouter", so a bot actually running on
+    the right model still shows the wrong one in the roster if that field
+    is trusted. This SESSION-level lock doesn't have that bug -- confirmed
+    live by reading the lock response back. get_roster() prefers this
+    recorded value over the profile's own (unreliable) field.
     """
     state = _read_state()
     session_id = (state.get("active_sessions") or {}).get(profile)
@@ -737,10 +762,16 @@ async def _lock_active_session_model(profile: str, provider: str, model: str) ->
     base = _bot_base(profile)
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            await client.post(
+            resp = await client.post(
                 f"{base}/api/sessions/{session_id}/model",
                 json={"provider": provider, "model": model},
                 headers=_api_headers(),
+            )
+        if resp.status_code < 400:
+            await _mutate_state(
+                lambda d: d.setdefault("locked_models", {}).__setitem__(
+                    profile, {"provider": provider, "model": model}
+                )
             )
     except httpx.HTTPError:
         pass
