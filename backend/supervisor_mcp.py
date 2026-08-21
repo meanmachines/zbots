@@ -32,17 +32,22 @@ mcp = MCPServer(
     name="bot-supervisor",
     version="1.0.0",
     instructions=(
-        "Tools for checking on and messaging other Hermes bot profiles on "
-        "this same gateway. Call list_bots() first to see who exists and "
-        "what they're doing, then message_bot(name, message) to actually "
-        "talk to one -- this delivers into that bot's own canonical "
-        "session and returns its real reply, the same mechanism "
-        "'hermes peer dm' uses. Each message_bot() call is a real "
-        "conversation turn for the target bot and becomes part of its own "
-        "history, so use it deliberately, not as a cheap status ping -- "
-        "for a snapshot of activity without starting a conversation, rely "
-        "on list_bots()'s last_message_preview/is_active fields instead."
+        "Tools for supervising other Hermes bot profiles on this same "
+        "gateway. Workflow: list_bots() first to see who exists (free, no "
+        "LLM call) -> get_bot_status(name) for a real 'what are you "
+        "actually doing right now' answer from that bot -> message_bot"
+        "(name, message) to give it an instruction, ask something else, or "
+        "delegate a task. get_bot_status() and message_bot() are both real "
+        "conversation turns for the target bot (their reply becomes part "
+        "of its own history), so use them deliberately, not as a cheap "
+        "poll -- list_bots()'s last_message_preview/is_active fields are "
+        "the free option when a rough sense of activity is enough."
     ),
+)
+
+_STATUS_PROMPT = (
+    "What are you working on right now? Give me your current status and "
+    "last completed task, not a general introduction."
 )
 
 
@@ -70,18 +75,29 @@ async def list_bots() -> list[dict]:
 
 
 @mcp.tool()
+async def get_bot_status(name: str) -> str:
+    """Ask a bot for its real current status and last completed task, using
+    a pre-engineered prompt so you don't need to phrase it yourself -- a
+    vague ask like 'what do you do' reliably gets a generic capabilities
+    blurb instead of a real answer (confirmed live). This is a genuine
+    conversation turn for the target bot, same as message_bot(), just with
+    the status-check prompt already correct. Use message_bot() directly
+    when you want to ask something else or give an instruction instead."""
+    async with httpx.AsyncClient(timeout=300) as client:
+        r = await client.post(f"{BOTS_UI_BASE}/bots/{name}/messages", json={"text": _STATUS_PROMPT})
+        r.raise_for_status()
+        return r.json()["reply"]
+
+
+@mcp.tool()
 async def message_bot(name: str, message: str) -> str:
     """Send a message to another bot's own canonical session and return its
     real reply. This is a genuine conversation turn for that bot -- it sees
     the message as if a user/peer sent it, and its reply becomes part of
-    its own conversation history, exactly like 'hermes peer dm' does.
-
-    Phrase status checks specifically, or you will get a generic
-    self-introduction instead of a real answer -- the model has no reason
-    to volunteer its actual current task/status unless directly asked for
-    it. Bad: 'what do you do' (invites a capabilities blurb). Good:
-    'What are you working on right now? Give me your current status and
-    last completed task, not a general introduction.'"""
+    its own conversation history, exactly like 'hermes peer dm' does. For a
+    plain status check, use get_bot_status(name) instead -- it already
+    asks the right way; a vague message here like 'what do you do' gets a
+    generic capabilities blurb, not a real answer."""
     async with httpx.AsyncClient(timeout=300) as client:
         r = await client.post(f"{BOTS_UI_BASE}/bots/{name}/messages", json={"text": message})
         r.raise_for_status()
