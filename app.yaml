@@ -1,0 +1,19 @@
+name: zbots
+memory_mb: 256
+port: 8080
+domains: []
+dependencies: []
+database: false
+persistent_storage:
+  mount_path: /opt/data
+env:
+  HERMES_DASHBOARD_URL:
+    required: true
+  HERMES_API_SERVER_URL:
+    required: true
+  HERMES_DASHBOARD_BASIC_AUTH_USERNAME:
+    required: true
+  HERMES_DASHBOARD_BASIC_AUTH_PASSWORD:
+    required: true
+  API_SERVER_KEY:
+    generate: hex

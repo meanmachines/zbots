@@ -53,14 +53,17 @@ Environment variables the backend reads:
 
 | Variable | Purpose |
 |---|---|
-| `HERMES_DASHBOARD_BASIC_AUTH_USERNAME` / `_PASSWORD` | Logs into Hermes' dashboard session API (`/auth/password-login`) on first request |
+| `HERMES_DASHBOARD_URL` | Hermes dashboard base URL (default `http://127.0.0.1:9119`) |
+| `HERMES_API_SERVER_URL` | Hermes api_server base URL (default `http://127.0.0.1:8642`) |
+| `HERMES_DASHBOARD_BASIC_AUTH_USERNAME` / `_PASSWORD` | Logs into Hermes' dashboard session API (`/auth/password-login`) on first request; also used by the standalone container as the nginx basic-auth gate for `/bots/*` |
 | `API_SERVER_KEY` | Bearer token for Hermes' `api_server` platform (actual chat) |
 | `BOTS_UI_STATE_PATH` | Where to persist local state (default `/opt/data/bots-ui-state.json`) |
 | `BOTS_UI_AVATAR_DIR` | Where uploaded avatar images live (default `/opt/data/bots-ui-avatars`) |
+| `BOTS_UI_API_KEY` | Optional shared secret: when set, every backend route except `/health` requires `Authorization: Bearer <key>` (defense-in-depth for non-browser clients; browser deployments should keep the nginx auth layer) |
 
 ```bash
 cd backend
-pip install fastapi uvicorn httpx
+pip install fastapi uvicorn httpx python-multipart
 uvicorn main:app --host 127.0.0.1 --port 8643
 ```
 
@@ -73,12 +76,43 @@ entrypoint).
 
 ## Deployment
 
-zBots is consumed as a git submodule by
+**Reference deployment:** zBots is consumed as a git submodule by
 [hermes-agent-wrapper](https://github.com/zaindroid/hermes-agent-wrapper),
 which bundles it into the same container as Hermes Agent itself (nginx in
 front, reverse-proxying `/bots/*` to static files and `/bots-api/*` to this
-backend). That's the actual reference deployment this project is developed
-and tested against.
+backend). That's the actual deployment this project is developed and tested
+against.
+
+**Standalone container:** the repo also ships its own `Dockerfile` /
+`nginx.conf` / `entrypoint.sh` for running zBots as its own container pointed
+at a Hermes instance elsewhere (or as a sidecar on the same host):
+
+```bash
+docker build -t zbots .
+docker run -p 8080:8080 \
+  -e HERMES_DASHBOARD_URL=http://hermes-host:9119 \
+  -e HERMES_API_SERVER_URL=http://hermes-host:8642 \
+  -e HERMES_DASHBOARD_BASIC_AUTH_USERNAME=admin \
+  -e HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=secret \
+  -e API_SERVER_KEY=changeme \
+  -v zbots-data:/opt/data \
+  zbots
+```
+
+The container exposes the UI on port 8080 under `/bots/` and the API under
+`/bots-api/`, gated by nginx basic auth using the same
+`HERMES_DASHBOARD_BASIC_AUTH_*` credentials. `app.yaml` declares the app for
+platforms that consume it (zorc-style deployment).
+
+## Development / tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests
+```
+
+The test suite mocks both Hermes surfaces, so it runs without a live Hermes
+instance.
 
 ## Roadmap
 
@@ -87,10 +121,10 @@ and tested against.
   browser
 - Hosted/multi-tenant version with per-user accounts and usage-based
   pricing, still fully BYOK for model providers
-- Native chat page (per-bot chat exists today inside the Bots roster; a
-  standalone general chat page with streaming and tool-call rendering is a
-  materially different scope than the admin pages here and hasn't been
-  attempted yet)
+- Native chat page (per-bot chat exists today inside the Bots roster and
+  streams replies live; a standalone general chat page with tool-call
+  rendering is a materially different scope than the admin pages here and
+  hasn't been attempted yet)
 
 ## License
 
