@@ -33,15 +33,25 @@ from typing import Any, Optional
 import httpx
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-DASHBOARD_BASE = "http://127.0.0.1:9119"
-API_SERVER_BASE = "http://127.0.0.1:8642"
+# Loopback defaults match the reference deployment (hermes-agent-wrapper runs
+# Hermes' dashboard and api_server on these ports inside the same container).
+# Standalone deployments point these at a reachable Hermes instance instead.
+DASHBOARD_BASE = os.environ.get("HERMES_DASHBOARD_URL", "http://127.0.0.1:9119").rstrip("/")
+API_SERVER_BASE = os.environ.get("HERMES_API_SERVER_URL", "http://127.0.0.1:8642").rstrip("/")
 
 DASHBOARD_USER = os.environ.get("HERMES_DASHBOARD_BASIC_AUTH_USERNAME", "")
 DASHBOARD_PASS = os.environ.get("HERMES_DASHBOARD_BASIC_AUTH_PASSWORD", "")
 API_SERVER_KEY = os.environ.get("API_SERVER_KEY", "")
+
+# Optional shared secret for direct backend access. When set, every route
+# except /health requires "Authorization: Bearer <key>". Browser deployments
+# should still keep a reverse-proxy auth layer (nginx basic auth in the
+# reference deployment) -- this is defense-in-depth for when the API is
+# reached by non-browser clients or accidentally exposed without the proxy.
+BOTS_UI_API_KEY = os.environ.get("BOTS_UI_API_KEY", "")
 
 STATE_PATH = Path(os.environ.get("BOTS_UI_STATE_PATH", "/opt/data/bots-ui-state.json"))
 AVATAR_DIR = Path(os.environ.get("BOTS_UI_AVATAR_DIR", "/opt/data/bots-ui-avatars"))
@@ -64,6 +74,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def _optional_api_key_auth(request, call_next):
+    if BOTS_UI_API_KEY and request.url.path != "/health":
+        provided = request.headers.get("Authorization", "")
+        if provided != f"Bearer {BOTS_UI_API_KEY}":
+            return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})
+    return await call_next(request)
+
+
 _state_lock = asyncio.Lock()
 
 
@@ -71,8 +91,12 @@ _state_lock = asyncio.Lock()
 # Local state (hidden bots / avatar choices / group definitions)
 # --------------------------------------------------------------------------
 
+STATE_VERSION = 1
+
+
 def _default_state() -> dict[str, Any]:
     return {
+        "version": STATE_VERSION,
         "hidden": [], "avatars": {}, "groups": {}, "titles": {}, "active_sessions": {},
         # What we actually session-locked for a bot (see
         # _lock_active_session_model's docstring for why Hermes' own
@@ -81,6 +105,19 @@ def _default_state() -> dict[str, Any]:
         # value when present, since it's the one guaranteed correct.
         "locked_models": {},
     }
+
+
+def _migrate_state(data: dict[str, Any]) -> dict[str, Any]:
+    """Bring an older state file forward.
+
+    Currently version 1 is the only schema and older files (pre-versioning)
+    simply lack the key; the migration is a no-op that stamps the current
+    version. Keeping the function separate means future fields have a single,
+    explicit place to be added instead of being sprinkled into _read_state.
+    """
+    if data.get("version") != STATE_VERSION:
+        data["version"] = STATE_VERSION
+    return data
 
 
 def _read_state() -> dict[str, Any]:
@@ -92,6 +129,7 @@ def _read_state() -> dict[str, Any]:
         return _default_state()
     if not isinstance(data, dict):
         return _default_state()
+    data = _migrate_state(data)
     data.setdefault("hidden", [])
     data.setdefault("avatars", {})
     data.setdefault("groups", {})
@@ -910,6 +948,11 @@ class GroupCreate(BaseModel):
     members: list[str]
 
 
+class GroupUpdate(BaseModel):
+    name: Optional[str] = None
+    members: Optional[list[str]] = None
+
+
 @app.get("/groups")
 async def list_groups() -> list[dict]:
     state = _read_state()
@@ -925,6 +968,27 @@ async def create_group(body: GroupCreate) -> dict:
     group = {"id": group_id, "name": body.name or f"Group ({', '.join(members)})", "members": members, "messages": []}
     await _mutate_state(lambda d: d["groups"].__setitem__(group_id, group))
     return group
+
+
+@app.patch("/groups/{group_id}")
+async def update_group(group_id: str, body: GroupUpdate) -> dict:
+    """Rename a group and/or change its members. Name edits stay local to
+    this app's state file -- there is no Hermes-side group object to update.
+    """
+    def _update(d):
+        group = (d.get("groups") or {}).get(group_id)
+        if group is None:
+            raise HTTPException(status_code=404, detail="Group not found.")
+        if body.name is not None:
+            group["name"] = body.name.strip() or group["name"]
+        if body.members is not None:
+            members = [_validate_name(m) for m in body.members]
+            if len(members) < 2:
+                raise HTTPException(status_code=400, detail="A group needs at least 2 members.")
+            group["members"] = members
+        return group
+
+    return await _mutate_state(_update)
 
 
 @app.delete("/groups/{group_id}")
@@ -956,6 +1020,23 @@ async def _append_group_message(group_id: str, entry: dict) -> None:
     await _mutate_state(_do)
 
 
+def _group_turn_context(group: dict, transcript: list[tuple[str, str]], round_num: int) -> str:
+    """Build the prompt one member sees for one turn of a group send.
+
+    Round 1 is the user's message on its own, exactly as before. Later rounds
+    include the user's message plus every reply already posted in this send,
+    so a bot that is pulled in by an @mention actually sees the conversation
+    it is being asked to continue, not a detached copy of the first message.
+    """
+    lines = [f"(in group '{group['name']}')"]
+    if round_num == 0:
+        lines.append(transcript[0][1])
+    else:
+        for sender, text in transcript:
+            lines.append(f"{sender}: {text}" if sender != "user" else text)
+    return "\n".join(lines)
+
+
 @app.post("/groups/{group_id}/messages")
 async def group_send(group_id: str, body: GroupSend) -> dict:
     state = _read_state()
@@ -970,6 +1051,10 @@ async def group_send(group_id: str, body: GroupSend) -> dict:
     sent = 0
     round_targets = [m for m in _MENTION_RE.findall(body.text) if m in members] or list(members)
     posted: list[dict] = []
+    # Running transcript of THIS send, used as context for later rounds so a
+    # reply that @-mentions another member is answered with the actual
+    # previous replies in front of it, not just the original user message.
+    transcript: list[tuple[str, str]] = [("user", body.text)]
     for round_num in range(GROUP_MAX_ROUNDS):
         if not round_targets or sent >= GROUP_MAX_MESSAGES:
             break
@@ -977,7 +1062,7 @@ async def group_send(group_id: str, body: GroupSend) -> dict:
         for target in round_targets:
             if sent >= GROUP_MAX_MESSAGES:
                 break
-            context = body.text if round_num == 0 else f"(replying in group '{group['name']}') {body.text}"
+            context = _group_turn_context(group, transcript, round_num)
             try:
                 reply = await send_to_bot(target, context)
             except HTTPException as exc:
@@ -986,6 +1071,7 @@ async def group_send(group_id: str, body: GroupSend) -> dict:
             await _append_group_message(group_id, entry)
             posted.append(entry)
             sent += 1
+            transcript.append((target, reply))
             for mention in _MENTION_RE.findall(reply):
                 if mention in members and mention != target:
                     next_targets.add(mention)
@@ -1500,6 +1586,28 @@ class ConfigRawBody(BaseModel):
 @app.put("/config/raw")
 async def put_config_raw(body: ConfigRawBody) -> dict:
     return await dash_send("PUT", "/api/config/raw", body.model_dump())
+
+
+@app.get("/ready")
+async def ready() -> dict:
+    """Readiness probe: 200 only when the Hermes dashboard is reachable.
+
+    The dashboard's /api/status is genuinely public (no session cookie), so
+    this is a real dependency check without touching auth state. Standalone
+    deployments on orchestrators that probe /ready get a truthful answer.
+    """
+    try:
+        r = await _dash_client.get("/api/status")
+        if r.status_code < 400:
+            return {"ok": True}
+        return JSONResponse(status_code=503, content={"ok": False, "detail": f"dashboard status HTTP {r.status_code}"})
+    except httpx.HTTPError as exc:
+        return JSONResponse(status_code=503, content={"ok": False, "detail": f"dashboard unreachable: {exc}"})
+
+
+@app.get("/version")
+async def version() -> dict:
+    return {"sha": os.environ.get("GIT_SHA", ""), "built": os.environ.get("BUILT_AT", "")}
 
 
 @app.get("/health")
