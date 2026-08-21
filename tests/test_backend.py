@@ -1,0 +1,278 @@
+"""Backend tests with the Hermes dashboard/api_server fully mocked.
+
+The point of this suite is to lock in zBots' own behavior -- auth, roster
+shaping, chat resilience, group edits -- without needing a live Hermes
+instance. Everything that would cross the wire is patched at the backend.main
+boundary.
+"""
+
+import asyncio
+import json
+
+import pytest
+from unittest.mock import AsyncMock, MagicMock
+
+import backend.main as m
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _profile(name, **overrides):
+    base = {
+        "name": name,
+        "display_name": None,
+        "description": f"{name} description",
+        "model": "model-a",
+        "provider": "prov-a",
+        "gateway_running": True,
+    }
+    base.update(overrides)
+    return base
+
+
+def _fake_response(status_code=200, payload=None, text=""):
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.text = text
+    resp.content = b"{}"
+    if payload is not None:
+        resp.json.return_value = payload
+    return resp
+
+
+class _FakeHTTPX:
+    """Async-context-manager stand-in for httpx.AsyncClient in send_to_bot."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    async def post(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return self.responses.pop(0)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Health / readiness / version
+# ---------------------------------------------------------------------------
+
+def test_health(client):
+    assert client.get("/health").json() == {"ok": True}
+
+
+def test_ready_ok(client, monkeypatch):
+    monkeypatch.setattr(m._dash_client, "get", AsyncMock(return_value=_fake_response(200, {})))
+    resp = client.get("/ready")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+
+
+def test_ready_unreachable(client, monkeypatch):
+    async def boom(*args, **kwargs):
+        raise m.httpx.ConnectError("no route")
+
+    monkeypatch.setattr(m._dash_client, "get", boom)
+    resp = client.get("/ready")
+    assert resp.status_code == 503
+    assert resp.json()["ok"] is False
+
+
+def test_version(client):
+    resp = client.get("/version")
+    assert resp.status_code == 200
+    assert "sha" in resp.json()
+
+
+# ---------------------------------------------------------------------------
+# Optional API-key auth
+# ---------------------------------------------------------------------------
+
+def test_api_key_auth_required_when_enabled(client, monkeypatch):
+    m.BOTS_UI_API_KEY = "s3cret"
+    monkeypatch.setattr(m, "dash_get", AsyncMock(return_value={"profiles": []}))
+    assert client.get("/roster").status_code == 401
+    assert client.get("/health").status_code == 200
+    ok = client.get("/roster", headers={"Authorization": "Bearer s3cret"})
+    assert ok.status_code == 200
+
+
+def test_api_key_auth_disabled_by_default(client, monkeypatch):
+    m.BOTS_UI_API_KEY = ""
+    monkeypatch.setattr(m, "dash_get", AsyncMock(return_value={"profiles": []}))
+    assert client.get("/roster").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Roster
+# ---------------------------------------------------------------------------
+
+def test_roster_orders_by_activity_and_hides_hidden(client, monkeypatch):
+    async def fake_dash_get(path, **kwargs):
+        assert path == "/api/profiles"
+        return {"profiles": [_profile("old"), _profile("new")]}
+
+    async def fake_activity(profile):
+        if profile == "new":
+            return {"preview": "hi", "last_active": 200.0, "is_active": True}
+        return {"preview": "", "last_active": 100.0, "is_active": False}
+
+    monkeypatch.setattr(m, "dash_get", fake_dash_get)
+    monkeypatch.setattr(m, "get_bot_activity", fake_activity)
+    rows = client.get("/roster").json()
+    assert [r["name"] for r in rows] == ["new", "old"]
+    assert rows[0]["is_active"] is True
+    assert rows[0]["preview"] == "hi"
+
+
+def test_roster_uses_local_title_when_profile_has_none(client, monkeypatch, state_file):
+    state_file.write_text(json.dumps({"titles": {"my-bot": "My Custom Bot"}}))
+    monkeypatch.setattr(m, "dash_get", AsyncMock(return_value={"profiles": [_profile("my-bot")]}))
+    monkeypatch.setattr(m, "get_bot_activity", AsyncMock(return_value={}))
+    rows = client.get("/roster").json()
+    assert rows[0]["title"] == "My Custom Bot"
+
+
+# ---------------------------------------------------------------------------
+# Bot CRUD
+# ---------------------------------------------------------------------------
+
+def test_create_bot_forces_explicit_provider_model(client, monkeypatch):
+    created = {}
+
+    async def fake_dash_send(method, path, body):
+        created["body"] = body
+        return {}
+
+    async def fake_default_model():
+        return "default-prov", "default-model"
+
+    async def fake_get_roster(include_hidden=False):
+        return [m.RosterEntry(name="alpha", title="Alpha", description="", provider="prov-a", model="model-a")]
+
+    monkeypatch.setattr(m, "dash_send", fake_dash_send)
+    monkeypatch.setattr(m, "_default_model", fake_default_model)
+    monkeypatch.setattr(m, "get_roster", fake_get_roster)
+
+    resp = client.post("/bots", json={"name": "alpha", "title": "Alpha", "description": "d"})
+    assert resp.status_code == 200
+    assert created["body"]["provider"] == "default-prov"
+    assert created["body"]["model"] == "default-model"
+
+
+def test_update_bot_locks_active_session_model(client, monkeypatch):
+    lock_calls = []
+
+    async def fake_dash_send(method, path, body):
+        return {}
+
+    async def fake_lock(profile, provider, model):
+        lock_calls.append((profile, provider, model))
+
+    monkeypatch.setattr(m, "dash_send", fake_dash_send)
+    monkeypatch.setattr(m, "_lock_active_session_model", fake_lock)
+
+    resp = client.patch("/bots/alpha", json={"provider": "prov-b", "model": "model-b"})
+    assert resp.status_code == 200
+    assert lock_calls == [("alpha", "prov-b", "model-b")]
+
+
+def test_get_bot_soul(client, monkeypatch):
+    monkeypatch.setattr(m, "dash_get", AsyncMock(return_value={"content": "# Persona"}))
+    resp = client.get("/bots/alpha/soul")
+    assert resp.status_code == 200
+    assert resp.json()["content"] == "# Persona"
+
+
+# ---------------------------------------------------------------------------
+# Chat resilience
+# ---------------------------------------------------------------------------
+
+def test_send_to_bot_retries_corrupted_reply(monkeypatch):
+    corrupted = _fake_response(200, {"message": {"content": "<unused1> <unused2> <unused3> garbage"}})
+    good = _fake_response(200, {"message": {"content": "clean reply"}})
+    fake = _FakeHTTPX([corrupted, good])
+
+    monkeypatch.setattr(m.httpx, "AsyncClient", lambda **kwargs: fake)
+    monkeypatch.setattr(m, "_ensure_bot_chat_session", AsyncMock(return_value=("s1", [])))
+
+    reply = asyncio.run(m.send_to_bot("alpha", "hello"))
+    assert reply == "clean reply"
+    assert len(fake.calls) == 2
+
+
+def test_send_to_bot_rolls_over_on_500(monkeypatch):
+    bad = _fake_response(500, text="Server got itself in trouble")
+    good = _fake_response(200, {"message": {"content": "after rollover"}})
+    fake = _FakeHTTPX([bad, good])
+
+    monkeypatch.setattr(m.httpx, "AsyncClient", lambda **kwargs: fake)
+    monkeypatch.setattr(m, "_ensure_bot_chat_session", AsyncMock(return_value=("s1", [])))
+    monkeypatch.setattr(m, "_roll_over_bot_session", AsyncMock(return_value="s2"))
+
+    reply = asyncio.run(m.send_to_bot("alpha", "hello"))
+    assert reply == "after rollover"
+    assert fake.calls[0][0][0].endswith("/s1/chat")
+    assert fake.calls[1][0][0].endswith("/s2/chat")
+
+
+# ---------------------------------------------------------------------------
+# Groups
+# ---------------------------------------------------------------------------
+
+def _create_group(client):
+    resp = client.post("/groups", json={"name": "Team", "members": ["alpha", "beta"]})
+    assert resp.status_code == 200
+    return resp.json()
+
+
+def test_group_update_rename_and_members(client):
+    group = _create_group(client)
+    resp = client.patch(f"/groups/{group['id']}", json={"name": "Renamed", "members": ["alpha", "gamma"]})
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "Renamed"
+    assert resp.json()["members"] == ["alpha", "gamma"]
+
+
+def test_group_update_rejects_single_member(client):
+    group = _create_group(client)
+    resp = client.patch(f"/groups/{group['id']}", json={"members": ["alpha"]})
+    assert resp.status_code == 400
+
+
+def test_group_send_feeds_transcript_to_later_rounds(client, monkeypatch):
+    group = _create_group(client)
+    send_mock = AsyncMock(side_effect=["alpha reply @beta", "beta reply"])
+    monkeypatch.setattr(m, "send_to_bot", send_mock)
+
+    resp = client.post(f"/groups/{group['id']}/messages", json={"text": "@alpha start"})
+    assert resp.status_code == 200
+    assert len(resp.json()["messages"]) == 2
+
+    first_ctx = send_mock.call_args_list[0].args[1]
+    second_ctx = send_mock.call_args_list[1].args[1]
+    assert "start" in first_ctx
+    assert "alpha reply @beta" in second_ctx
+
+
+# ---------------------------------------------------------------------------
+# Local state
+# ---------------------------------------------------------------------------
+
+def test_state_migration_stamps_version(state_file):
+    state_file.write_text(json.dumps({"hidden": ["old-bot"]}))
+    data = m._read_state()
+    assert data["version"] == m.STATE_VERSION
+    assert data["hidden"] == ["old-bot"]
+
+
+def test_state_defaults_when_missing(state_file):
+    assert m._read_state()["version"] == m.STATE_VERSION
+    assert m._read_state()["groups"] == {}

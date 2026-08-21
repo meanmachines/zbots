@@ -1,0 +1,9 @@
+# Dev/test dependencies for zBots itself.
+# Production runs inside hermes-agent-wrapper's container, which already has
+# FastAPI/uvicorn/httpx (and python-multipart) in Hermes' own venv.
+fastapi
+uvicorn
+httpx
+python-multipart
+pytest
+pytest-asyncio
