@@ -42,12 +42,25 @@ fi
 # password takes effect on restart.
 htpasswd -bc /etc/nginx/.htpasswd-bots "$HERMES_DASHBOARD_BASIC_AUTH_USERNAME" "$HERMES_DASHBOARD_BASIC_AUTH_PASSWORD"
 
+# Chat/sessions run in-process against the engine (backend/engine.py), but
+# everything else main.py does -- roster, profile CRUD, MCP servers, skills,
+# env vars, cron, webhooks, files, raw config -- is still a real HTTP client
+# (dash_get/dash_send) against a Hermes dashboard server, same as the old
+# sidecar architecture. That server has to actually run somewhere, and
+# nothing else in this container provides it, so start the headless backend
+# (`hermes serve` -- same gateway as `hermes dashboard`, minus the browser
+# and the web UI build main.py never needs) bound to loopback only. The
+# basic-auth env vars below are what its auth provider picks up; main.py
+# logs into it with the same pair (see _dashboard_login).
+(exec hermes serve --host 127.0.0.1 --port "${HERMES_DASHBOARD_PORT:-9119}" --skip-build --no-open) &
+DASHBOARD_PID=$!
+
 # FastAPI backend, loopback-only. nginx fronts it on 8080.
 (cd /opt/zbots/backend && exec python -m uvicorn main:app --host 127.0.0.1 --port "${BOTS_UI_PORT:-8643}") &
 BACKEND_PID=$!
 
-# Stop the backend if nginx exits so the container signals failure instead of
-# hanging around with a half-dead process tree.
-trap 'kill "$BACKEND_PID" 2>/dev/null || true' EXIT
+# Stop the other two if nginx exits so the container signals failure instead
+# of hanging around with a half-dead process tree.
+trap 'kill "$BACKEND_PID" "$DASHBOARD_PID" 2>/dev/null || true' EXIT
 
 nginx -g 'daemon off;'
