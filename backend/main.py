@@ -33,14 +33,25 @@ from typing import Any, Optional
 import httpx
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-DASHBOARD_BASE = "http://127.0.0.1:9119"
-API_SERVER_BASE = "http://127.0.0.1:8642"
+# Loopback defaults match the reference deployment (hermes-agent-wrapper runs
+# Hermes' dashboard and api_server on these ports inside the same container).
+# Standalone deployments point these at a reachable Hermes instance instead.
+DASHBOARD_BASE = os.environ.get("HERMES_DASHBOARD_URL", "http://127.0.0.1:9119").rstrip("/")
+API_SERVER_BASE = os.environ.get("HERMES_API_SERVER_URL", "http://127.0.0.1:8642").rstrip("/")
 
 DASHBOARD_USER = os.environ.get("HERMES_DASHBOARD_BASIC_AUTH_USERNAME", "")
 DASHBOARD_PASS = os.environ.get("HERMES_DASHBOARD_BASIC_AUTH_PASSWORD", "")
 API_SERVER_KEY = os.environ.get("API_SERVER_KEY", "")
+
+# Optional shared secret for direct backend access. When set, every route
+# except /health requires "Authorization: Bearer <key>". Browser deployments
+# should still keep a reverse-proxy auth layer (nginx basic auth in the
+# reference deployment) -- this is defense-in-depth for when the API is
+# reached by non-browser clients or accidentally exposed without the proxy.
+BOTS_UI_API_KEY = os.environ.get("BOTS_UI_API_KEY", "")
 
 STATE_PATH = Path(os.environ.get("BOTS_UI_STATE_PATH", "/opt/data/bots-ui-state.json"))
 AVATAR_DIR = Path(os.environ.get("BOTS_UI_AVATAR_DIR", "/opt/data/bots-ui-avatars"))
@@ -63,6 +74,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def _optional_api_key_auth(request, call_next):
+    if BOTS_UI_API_KEY and request.url.path != "/health":
+        provided = request.headers.get("Authorization", "")
+        if provided != f"Bearer {BOTS_UI_API_KEY}":
+            return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})
+    return await call_next(request)
+
 _state_lock = asyncio.Lock()
 
 
@@ -70,8 +90,31 @@ _state_lock = asyncio.Lock()
 # Local state (hidden bots / avatar choices / group definitions)
 # --------------------------------------------------------------------------
 
+STATE_VERSION = 1
+
+
 def _default_state() -> dict[str, Any]:
-    return {"hidden": [], "avatars": {}, "groups": {}, "titles": {}, "active_sessions": {}}
+    return {
+        "version": STATE_VERSION,
+        "hidden": [],
+        "avatars": {},
+        "groups": {},
+        "titles": {},
+        "active_sessions": {},
+    }
+
+
+def _migrate_state(data: dict[str, Any]) -> dict[str, Any]:
+    """Bring an older state file forward.
+
+    Currently version 1 is the only schema and older files (pre-versioning)
+    simply lack the key; the migration is a no-op that stamps the current
+    version. Keeping the function separate means future fields have a single,
+    explicit place to be added instead of being sprinkled into _read_state.
+    """
+    if data.get("version") != STATE_VERSION:
+        data["version"] = STATE_VERSION
+    return data
 
 
 def _read_state() -> dict[str, Any]:
@@ -83,6 +126,7 @@ def _read_state() -> dict[str, Any]:
         return _default_state()
     if not isinstance(data, dict):
         return _default_state()
+    data = _migrate_state(data)
     data.setdefault("hidden", [])
     data.setdefault("avatars", {})
     data.setdefault("groups", {})
@@ -180,230 +224,49 @@ async def dash_send(method: str, path: str, body: Optional[dict] = None) -> Any:
 
 
 # --------------------------------------------------------------------------
-# api_server client (Bearer auth, port 8642) -- actual bot chat
+# Bot chat -- runs in-process via engine.py instead of over HTTP to a
+# separately-running gateway. See engine.py's module docstring for why and
+# how; these three functions are thin wrappers that add the one thing
+# engine.py deliberately doesn't own -- zBots' local state (which session
+# id is each bot's current active one).
+#
+# Two session operations stay on HTTP for now, not yet ported to engine.py:
+# mid-conversation model-switch (set_session_model below) and session
+# delete (delete_session further down). Both are narrower, edge-case calls
+# outside the core chat path, not the same admin-CRUD-stays-HTTP reasoning
+# as profiles/MCP/skills/env/cron -- they could move to engine.py later the
+# same way chat/sessions/messages did, just not done in this pass.
 # --------------------------------------------------------------------------
 
+import engine as _engine
+
+
 def _bot_base(profile: str) -> str:
-    # Every bot is a profile under the SAME running gateway; the multiplex
-    # mirror (/p/<profile>/) selects which profile's model/skills config
-    # handles the request. IMPORTANT constraint found live: it does NOT
-    # give each profile an isolated session store -- sessions created via
-    # any /p/<profile>/ prefix land in the one shared state.db the main
-    # gateway process already has open (confirmed: profile_name/session_key
-    # /chat_id/origin_json are all NULL on a multiplexed session row, and no
-    # per-profile state.db file is ever created). So instead of Hermes' own
-    # peer.py convention (a single globally-titled "Bot Chat" session, which
-    # only stays unique across genuinely separate gateway processes/peers),
-    # each bot here gets its own uniquely-titled session -- see
-    # _bot_chat_title(). That keeps every bot's thread correctly isolated
-    # even though they're all rows in the same physical table.
     if profile == "default":
         return API_SERVER_BASE
     return f"{API_SERVER_BASE}/p/{profile}"
-
-
-_BOT_SESSION_PREFIX = "[Bots UI]"
-
-
-def _bot_chat_title(profile: str, n: int = 1) -> str:
-    base = f"{_BOT_SESSION_PREFIX} {profile}"
-    return base if n <= 1 else f"{base} #{n}"
-
-
-_BOT_SESSION_SUFFIX_RE = re.compile(r"^\[Bots UI\] ([a-zA-Z0-9_-]+)(?: #(\d+))?$")
-
-
-def _bot_session_rollover_n(title: str, profile: str) -> Optional[int]:
-    """If title belongs to this bot's session family, its rollover number (1 if bare)."""
-    m = _BOT_SESSION_SUFFIX_RE.match((title or "").strip())
-    if not m or m.group(1) != profile:
-        return None
-    return int(m.group(2)) if m.group(2) else 1
 
 
 def _api_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {API_SERVER_KEY}", "Content-Type": "application/json"}
 
 
-_STREAM_CORRUPTION_RE = re.compile(r"(<unused\d+>\s*){3,}")
-
-
-def _is_corrupted_reply(text: str) -> bool:
-    """Detects the garbage-token artifact from a known upstream bug where
-    Hermes cancels its internal LLM stream after ~1.5s of silence during
-    prefill -- hits hardest on self-hosted/local providers with large
-    system prompts or big models, exactly this platform's core use case
-    (NousResearch/hermes-agent#87697, open, no fix as of writing). The
-    corrupted reply is otherwise indistinguishable from a real one (still a
-    200, still valid JSON), so this is the only place it can be caught.
-    """
-    return bool(_STREAM_CORRUPTION_RE.search(text or ""))
-
-
-async def _list_bot_sessions(client: httpx.AsyncClient, base: str, profile: str) -> list[dict]:
-    """Every session that has ever belonged to this bot (all rollovers), oldest first.
-
-    Sessions created through the /p/<profile>/ multiplex mirror share one
-    physical session store with no persisted profile identity (see
-    _bot_base's docstring) -- title is the only thing that reliably scopes
-    a session to a bot, so this is a title-prefix scan, not a real query.
-    """
-    r = await client.get(f"{base}/api/sessions", params={"limit": 200}, headers=_api_headers())
-    if r.status_code >= 400:
-        raise HTTPException(status_code=r.status_code, detail=r.text[:500])
-    rows = []
-    for row in r.json().get("data") or []:
-        if isinstance(row, dict) and _bot_session_rollover_n(row.get("title"), profile) is not None:
-            rows.append(row)
-    rows.sort(key=lambda row: row.get("started_at") or 0)
-    return rows
-
-
-async def _ensure_bot_chat_session(client: httpx.AsyncClient, base: str, profile: str) -> tuple[str, list[dict]]:
-    """Return (this bot's current/active session id, all of its sessions).
-
-    Prefers the session id already recorded as active in local state (set
-    the last time a rollover happened) over a fresh title search, so a
-    rollover doesn't get silently "found" and reused again next call --
-    only used to bootstrap the very first session, or to recover if state
-    was lost.
-    """
+async def send_to_bot(profile: str, message: str, *, timeout: float = 300.0) -> str:
     state = _read_state()
     active_id = (state.get("active_sessions") or {}).get(profile)
-    all_sessions = await _list_bot_sessions(client, base, profile)
-    if active_id and any(s.get("id") == active_id for s in all_sessions):
-        return active_id, all_sessions
-    if all_sessions:
-        session_id = str(all_sessions[-1]["id"])
+    reply, session_id = await _engine.send_to_bot(profile, message, API_SERVER_KEY, active_id)
+    if session_id != active_id:
         await _mutate_state(lambda d: d.setdefault("active_sessions", {}).__setitem__(profile, session_id))
-        return session_id, all_sessions
-
-    r = await client.post(
-        f"{base}/api/sessions",
-        json={"title": _bot_chat_title(profile), "source": "bots_ui"},
-        headers=_api_headers(),
-    )
-    if r.status_code >= 400:
-        raise HTTPException(status_code=r.status_code, detail=r.text[:500])
-    payload = r.json()
-    session = payload.get("session") if isinstance(payload.get("session"), dict) else payload
-    session_id = str(session.get("id") or session.get("session_id") or "")
-    if not session_id:
-        raise HTTPException(status_code=502, detail="api_server did not return a session id")
-    await _mutate_state(lambda d: d.setdefault("active_sessions", {}).__setitem__(profile, session_id))
-    return session_id, [session]
-
-
-async def _roll_over_bot_session(client: httpx.AsyncClient, base: str, profile: str, all_sessions: list[dict]) -> str:
-    """Start a fresh session for this bot after its current one wedges.
-
-    The old session is NOT deleted -- its history stays real and readable
-    (get_bot_messages merges every rollover's messages back together), so
-    a server-side bug that wedges a session no longer means losing the
-    conversation, just starting a new physical session under the hood.
-    """
-    next_n = 1 + max((_bot_session_rollover_n(s.get("title"), profile) or 0) for s in all_sessions)
-    r = await client.post(
-        f"{base}/api/sessions",
-        json={"title": _bot_chat_title(profile, next_n), "source": "bots_ui"},
-        headers=_api_headers(),
-    )
-    if r.status_code >= 400:
-        raise HTTPException(status_code=r.status_code, detail=r.text[:500])
-    payload = r.json()
-    session = payload.get("session") if isinstance(payload.get("session"), dict) else payload
-    session_id = str(session.get("id") or session.get("session_id") or "")
-    if not session_id:
-        raise HTTPException(status_code=502, detail="api_server did not return a session id")
-    await _mutate_state(lambda d: d.setdefault("active_sessions", {}).__setitem__(profile, session_id))
-    return session_id
-
-
-async def send_to_bot(profile: str, message: str, *, timeout: float = 300.0) -> str:
-    """Send one message to a bot's active session; return the reply text.
-
-    Real, recurring bug found live (not a one-off): a session that answers
-    correctly on its first turn can start 500ing on every turn after --
-    confirmed root cause via the server's own traceback (agent.log), even
-    though the api_server's error response itself is just a generic "Server
-    got itself in trouble" plain-text page with no detail to match on.
-    Real root cause (traced through agent_init.py/api_server.py source,
-    live-tested against half a dozen workarounds -- explicit provider/model
-    in the body, a Hermes-native provider entry, the virtual "hermes-agent"
-    model alias, session forking -- none of which avoided it): once a
-    session's `model` field gets persisted as a real provider model string
-    (which happens automatically after its first turn), the NEXT turn's
-    resolver re-reads that stored string and tries to resolve it as a route
-    alias instead of a raw model id, fails, and falls through to an
-    unconfigured "custom/main" placeholder. This is inside Hermes' own
-    closed agent_init.py/api_server.py, not fixable from here, and appears
-    to affect every session after its first turn, multiplexed or not.
-
-    Self-healing instead: on any 500, roll over to a brand-new session
-    (kept, not deleted, so its own history is still real) and retry once.
-    get_bot_messages() merges every rollover back into one continuous
-    thread, so this is invisible to the user beyond the reply arriving
-    from a "new" session under the hood.
-
-    Separately, a 200 response can still carry a corrupted reply -- see
-    _is_corrupted_reply's docstring (hermes-agent#87697). That's not a
-    wedged session, just a bad single turn, so the fix is a plain retry on
-    the same session (no rollover) rather than the 500 path above.
-    """
-    base = _bot_base(profile)
-
-    async def _post(sid: str):
-        return await client.post(
-            f"{base}/api/sessions/{sid}/chat",
-            json={"message": message},
-            headers=_api_headers(),
-        )
-
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        session_id, all_sessions = await _ensure_bot_chat_session(client, base, profile)
-        r = await _post(session_id)
-        if r.status_code == 500:
-            session_id = await _roll_over_bot_session(client, base, profile, all_sessions)
-            r = await _post(session_id)
-        if r.status_code >= 400:
-            raise HTTPException(status_code=r.status_code, detail=r.text[:500])
-        result = r.json()
-        msg = result.get("message")
-        reply = str(msg.get("content") or "") if isinstance(msg, dict) else ""
-
-        if _is_corrupted_reply(reply):
-            r = await _post(session_id)
-            if r.status_code == 500:
-                session_id = await _roll_over_bot_session(client, base, profile, all_sessions)
-                r = await _post(session_id)
-            if r.status_code >= 400:
-                raise HTTPException(status_code=r.status_code, detail=r.text[:500])
-            result = r.json()
-            msg = result.get("message")
-            retried = str(msg.get("content") or "") if isinstance(msg, dict) else ""
-            if not _is_corrupted_reply(retried):
-                reply = retried
-            # Both attempts corrupted: return the first one rather than loop
-            # forever -- the user still sees something, and it's on them to
-            # notice and retry manually if their prompt/model combo is
-            # consistently hitting the ~1.5s prefill window from #87697.
-
-        return reply
+    return reply
 
 
 async def get_bot_activity(profile: str) -> dict:
     """This bot's own most-recent session summary for the roster (preview/
-    timestamp/active) -- across its whole session family (see
-    _list_bot_sessions), NOT "most recent session on this multiplex base",
-    since that base is shared across every bot on this gateway (see
-    _bot_base's docstring) and would otherwise surface a completely
-    unrelated bot's/human's activity.
+    timestamp/active) across its whole session family.
     """
-    base = _bot_base(profile)
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            sessions = await _list_bot_sessions(client, base, profile)
-    except HTTPException:
+        sessions = await _engine._list_bot_sessions(profile, _engine._api_headers(API_SERVER_KEY))
+    except RuntimeError:
         return {}
     if not sessions:
         return {}
@@ -418,32 +281,7 @@ async def get_bot_activity(profile: str) -> dict:
 
 
 async def get_bot_messages(profile: str, limit: int = 200) -> list[dict]:
-    """Every message across this bot's whole session family, oldest first.
-
-    Not just its current active session: a server-side bug (see
-    send_to_bot's docstring) can force a mid-conversation rollover to a new
-    physical session, and the point of tracking the whole family is exactly
-    so that rollover doesn't make earlier messages disappear from the
-    user's view.
-    """
-    base = _bot_base(profile)
-    async with httpx.AsyncClient(timeout=30) as client:
-        sessions = await _list_bot_sessions(client, base, profile)
-        if not sessions:
-            return []
-        all_messages: list[dict] = []
-        for session in sessions:
-            r = await client.get(
-                f"{base}/api/sessions/{session['id']}/messages",
-                params={"limit": limit},
-                headers=_api_headers(),
-            )
-            if r.status_code >= 400:
-                continue
-            payload = r.json()
-            all_messages.extend(payload.get("data") or payload.get("messages") or [])
-        all_messages.sort(key=lambda m: m.get("timestamp") or 0)
-        return all_messages[-limit:]
+    return await _engine.get_bot_messages(profile, API_SERVER_KEY, limit=limit)
 
 
 # --------------------------------------------------------------------------
@@ -764,6 +602,11 @@ class GroupCreate(BaseModel):
     members: list[str]
 
 
+class GroupUpdate(BaseModel):
+    name: Optional[str] = None
+    members: Optional[list[str]] = None
+
+
 @app.get("/groups")
 async def list_groups() -> list[dict]:
     state = _read_state()
@@ -779,6 +622,27 @@ async def create_group(body: GroupCreate) -> dict:
     group = {"id": group_id, "name": body.name or f"Group ({', '.join(members)})", "members": members, "messages": []}
     await _mutate_state(lambda d: d["groups"].__setitem__(group_id, group))
     return group
+
+
+@app.patch("/groups/{group_id}")
+async def update_group(group_id: str, body: GroupUpdate) -> dict:
+    """Rename a group and/or change its members. Name edits stay local to
+    this app's state file -- there is no Hermes-side group object to update.
+    """
+    def _update(d):
+        group = (d.get("groups") or {}).get(group_id)
+        if group is None:
+            raise HTTPException(status_code=404, detail="Group not found.")
+        if body.name is not None:
+            group["name"] = body.name.strip() or group["name"]
+        if body.members is not None:
+            members = [_validate_name(m) for m in body.members]
+            if len(members) < 2:
+                raise HTTPException(status_code=400, detail="A group needs at least 2 members.")
+            group["members"] = members
+        return group
+
+    return await _mutate_state(_update)
 
 
 @app.delete("/groups/{group_id}")
@@ -810,6 +674,23 @@ async def _append_group_message(group_id: str, entry: dict) -> None:
     await _mutate_state(_do)
 
 
+def _group_turn_context(group: dict, transcript: list[tuple[str, str]], round_num: int) -> str:
+    """Build the prompt one member sees for one turn of a group send.
+
+    Round 1 is the user's message on its own, exactly as before. Later rounds
+    include the user's message plus every reply already posted in this send,
+    so a bot that is pulled in by an @mention actually sees the conversation
+    it is being asked to continue, not a detached copy of the first message.
+    """
+    lines = [f"(in group '{group['name']}')"]
+    if round_num == 0:
+        lines.append(transcript[0][1])
+    else:
+        for sender, text in transcript:
+            lines.append(f"{sender}: {text}" if sender != "user" else text)
+    return "\n".join(lines)
+
+
 @app.post("/groups/{group_id}/messages")
 async def group_send(group_id: str, body: GroupSend) -> dict:
     state = _read_state()
@@ -824,6 +705,10 @@ async def group_send(group_id: str, body: GroupSend) -> dict:
     sent = 0
     round_targets = [m for m in _MENTION_RE.findall(body.text) if m in members] or list(members)
     posted: list[dict] = []
+    # Running transcript of THIS send, used as context for later rounds so a
+    # reply that @-mentions another member is answered with the actual
+    # previous replies in front of it, not just the original user message.
+    transcript: list[tuple[str, str]] = [("user", body.text)]
     for round_num in range(GROUP_MAX_ROUNDS):
         if not round_targets or sent >= GROUP_MAX_MESSAGES:
             break
@@ -831,7 +716,7 @@ async def group_send(group_id: str, body: GroupSend) -> dict:
         for target in round_targets:
             if sent >= GROUP_MAX_MESSAGES:
                 break
-            context = body.text if round_num == 0 else f"(replying in group '{group['name']}') {body.text}"
+            context = _group_turn_context(group, transcript, round_num)
             try:
                 reply = await send_to_bot(target, context)
             except HTTPException as exc:
@@ -840,6 +725,7 @@ async def group_send(group_id: str, body: GroupSend) -> dict:
             await _append_group_message(group_id, entry)
             posted.append(entry)
             sent += 1
+            transcript.append((target, reply))
             for mention in _MENTION_RE.findall(reply):
                 if mention in members and mention != target:
                     next_targets.add(mention)
@@ -1311,6 +1197,28 @@ class ConfigRawBody(BaseModel):
 @app.put("/config/raw")
 async def put_config_raw(body: ConfigRawBody) -> dict:
     return await dash_send("PUT", "/api/config/raw", body.model_dump())
+
+
+@app.get("/ready")
+async def ready() -> dict:
+    """Readiness probe: 200 only when the Hermes dashboard is reachable.
+
+    The dashboard's /api/status is genuinely public (no session cookie), so
+    this is a real dependency check without touching auth state. Standalone
+    deployments on orchestrators that probe /ready get a truthful answer.
+    """
+    try:
+        r = await _dash_client.get("/api/status")
+        if r.status_code < 400:
+            return {"ok": True}
+        return JSONResponse(status_code=503, content={"ok": False, "detail": f"dashboard status HTTP {r.status_code}"})
+    except httpx.HTTPError as exc:
+        return JSONResponse(status_code=503, content={"ok": False, "detail": f"dashboard unreachable: {exc}"})
+
+
+@app.get("/version")
+async def version() -> dict:
+    return {"sha": os.environ.get("GIT_SHA", ""), "built": os.environ.get("BUILT_AT", "")}
 
 
 @app.get("/health")
