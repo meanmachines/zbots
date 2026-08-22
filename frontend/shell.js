@@ -40,10 +40,10 @@ function renderShell(activeId) {
 
   const brand = document.createElement("div");
   brand.id = "shell-nav-brand";
-  brand.innerHTML = `${icon("system", 20)}<span>Hermes</span>`;
+  brand.innerHTML = `${icon("system", 20)}<span>zBots</span>`;
   nav.appendChild(brand);
 
-  let activeLabel = "Hermes";
+  let activeLabel = "zBots";
   NAV_GROUPS.forEach((group) => {
     const label = document.createElement("div");
     label.className = "shell-nav-group-label";

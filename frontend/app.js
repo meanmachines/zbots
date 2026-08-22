@@ -769,6 +769,89 @@ function appendOptimisticUserMessage(text) {
   pane.scrollTop = pane.scrollHeight;
 }
 
+function appendStreamingBotMessage() {
+  const pane = document.getElementById("messages-pane");
+  const div = document.createElement("div");
+  div.id = "streaming-bot-msg";
+  div.className = "msg bot msg-pop";
+  pane.appendChild(div);
+  pane.scrollTop = pane.scrollHeight;
+  return div;
+}
+
+// Consumes the backend's SSE proxy (see stream_to_bot() in main.py) and
+// appends each assistant.delta live instead of waiting for the full reply
+// to generate server-side -- this is what actually fixes the "goes into
+// wait processing on each query" complaint (the desktop app feels fast
+// because it streams; this app previously didn't). Falls back
+// transparently server-side for bots whose provider can't resolve through
+// Hermes' /p/<profile>/ multiplex mirror (a real upstream Hermes bug, not
+// fixable here) -- from this function's point of view that just looks
+// like one big delta instead of many small ones, no special-casing needed
+// on this end.
+async function streamBotReply(botName, text, isStillActive) {
+  // Real bug found live: without the isStillActive gate below, a delta
+  // arriving after the user switched to a DIFFERENT chat would call
+  // appendStreamingBotMessage() against whatever #messages-pane currently
+  // shows -- i.e. bot A's reply visibly streaming into bot B's window.
+  // The old blocking send never had this problem because it never touched
+  // the DOM until the final, already-gated loadMessages() call. The fetch
+  // itself is never aborted on a switch-away -- the reply still needs to
+  // reach the server and land in bot A's real session; only the DOM
+  // writes are suppressed once the user has moved on.
+  const res = await fetch(`${API}/bots/${botName}/messages/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  if (!res.ok || !res.body) {
+    let detail = res.statusText;
+    try {
+      const body = await res.json();
+      detail = body.detail || detail;
+    } catch (_) {}
+    throw new Error(detail);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buf = "";
+  let bubble = null;
+  let sawDelta = false;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf("\n\n")) !== -1) {
+      const rawEvent = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      let eventName = "message";
+      let dataStr = "";
+      for (const line of rawEvent.split("\n")) {
+        if (line.startsWith("event:")) eventName = line.slice(6).trim();
+        else if (line.startsWith("data:")) dataStr += line.slice(5).trim();
+      }
+      if (!dataStr) continue;
+      let payload;
+      try {
+        payload = JSON.parse(dataStr);
+      } catch (_) {
+        continue;
+      }
+      if (eventName === "assistant.delta" && payload.delta && isStillActive()) {
+        if (!sawDelta) {
+          hideTypingIndicator();
+          bubble = appendStreamingBotMessage();
+          sawDelta = true;
+        }
+        bubble.textContent += payload.delta;
+        const pane = document.getElementById("messages-pane");
+        pane.scrollTop = pane.scrollHeight;
+      }
+    }
+  }
+}
+
 function extractText(row) {
   if (typeof row.content === "string") return row.content;
   if (Array.isArray(row.content)) {
@@ -831,7 +914,7 @@ async function sendComposerMessage() {
   showTypingIndicator();
   try {
     if (target.kind === "bot") {
-      await apiSend("POST", `/bots/${target.id}/messages`, { text });
+      await streamBotReply(target.id, text, isStillActive);
     } else {
       await apiSend("POST", `/groups/${target.id}/messages`, { text, sender: "user" });
     }
@@ -841,6 +924,7 @@ async function sendComposerMessage() {
     if (isStillActive()) {
       hideTypingIndicator();
       document.getElementById("optimistic-user-msg")?.remove();
+      document.getElementById("streaming-bot-msg")?.remove();
       input.value = text;
     }
     toast(`Send to ${target.id} failed: ` + e.message);

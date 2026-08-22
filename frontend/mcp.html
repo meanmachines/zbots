@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>MCP Servers - Hermes</title>
+  <title>MCP Servers - zBots</title>
   <link rel="stylesheet" href="/bots/styles.css" />
 </head>
 <body>
@@ -16,7 +16,10 @@
             <h1>MCP Servers</h1>
             <p>Model Context Protocol tool servers available to every bot.</p>
           </div>
-          <button id="add-mcp-btn" class="btn primary btn-icon-label"></button>
+          <div style="display:flex; gap:0.5rem;">
+            <button id="browse-catalog-btn" class="btn btn-icon-label"></button>
+            <button id="add-mcp-btn" class="btn primary btn-icon-label"></button>
+          </div>
         </div>
         <div class="page-body">
           <div id="mcp-list" class="loading-hint">Loading...</div>
@@ -63,6 +66,36 @@
         <div class="modal-actions">
           <button type="button" class="btn" id="mcp-modal-cancel">Cancel</button>
           <button type="submit" class="btn primary">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Catalog browse -->
+  <div class="modal-backdrop" id="catalog-modal-backdrop">
+    <div class="modal modal-wide">
+      <h2>Browse integrations</h2>
+      <p style="color:var(--text-muted); font-size:0.85rem; margin-top:-0.5rem;">
+        Nous-approved MCP integrations -- the same catalog the Hermes desktop app's
+        one-click "Add integration" uses.
+      </p>
+      <div id="catalog-list" class="loading-hint">Loading...</div>
+      <div class="modal-actions">
+        <button type="button" class="btn" id="catalog-modal-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Required env vars for a catalog entry that needs them (e.g. API keys) -->
+  <div class="modal-backdrop" id="catalog-env-modal-backdrop">
+    <div class="modal">
+      <h2 id="catalog-env-title">Set up integration</h2>
+      <p id="catalog-env-sub" style="color:var(--text-muted); font-size:0.85rem;"></p>
+      <form id="catalog-env-form">
+        <div id="catalog-env-fields"></div>
+        <div class="modal-actions">
+          <button type="button" class="btn" id="catalog-env-cancel">Cancel</button>
+          <button type="submit" class="btn primary">Connect</button>
         </div>
       </form>
     </div>

@@ -33,7 +33,7 @@ from typing import Any, Optional
 import httpx
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 # Loopback defaults match the reference deployment (hermes-agent-wrapper runs
@@ -83,6 +83,7 @@ async def _optional_api_key_auth(request, call_next):
             return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})
     return await call_next(request)
 
+
 _state_lock = asyncio.Lock()
 
 
@@ -101,6 +102,12 @@ def _default_state() -> dict[str, Any]:
         "groups": {},
         "titles": {},
         "active_sessions": {},
+        # What we actually session-locked for a bot (see
+        # _lock_active_session_model's docstring for why Hermes' own
+        # profile-level provider field can't be trusted for custom
+        # providers) -- the roster prefers this over the profile's own
+        # value when present, since it's the one guaranteed correct.
+        "locked_models": {},
     }
 
 
@@ -132,6 +139,7 @@ def _read_state() -> dict[str, Any]:
     data.setdefault("groups", {})
     data.setdefault("titles", {})
     data.setdefault("active_sessions", {})
+    data.setdefault("locked_models", {})
     return data
 
 
@@ -238,7 +246,15 @@ async def dash_send(method: str, path: str, body: Optional[dict] = None) -> Any:
 # same way chat/sessions/messages did, just not done in this pass.
 # --------------------------------------------------------------------------
 
-import engine as _engine
+# engine.py is loaded relative to this package when main.py is imported as
+# backend.main (tests do this, importing from the repo root), and as a bare
+# top-level module when uvicorn runs it directly with cwd inside backend/
+# (main:app is not part of any package in that context, so the relative
+# form raises ImportError there instead).
+try:
+    from . import engine as _engine
+except ImportError:
+    import engine as _engine
 
 
 def _bot_base(profile: str) -> str:
@@ -258,6 +274,42 @@ async def send_to_bot(profile: str, message: str, *, timeout: float = 300.0) -> 
     if session_id != active_id:
         await _mutate_state(lambda d: d.setdefault("active_sessions", {}).__setitem__(profile, session_id))
     return reply
+
+
+async def stream_to_bot(profile: str, message: str):
+    """SSE-shaped variant of send_to_bot() for the interactive chat UI.
+
+    Not real per-token streaming right now -- this is a placeholder that
+    keeps the /messages/stream endpoint and its frontend contract working
+    while the engine runs in-process. The original version of this function
+    proxied the engine's own POST /api/sessions/{id}/chat/stream straight
+    through as SSE for real live-typing deltas; that endpoint is
+    aiohttp-handler-shaped (_handle_session_chat_stream) the same way
+    _handle_session_chat is, and engine.py doesn't have an in-process
+    wrapper for it yet (see engine.py's module docstring for the
+    make_mocked_request pattern the non-streaming path already uses --
+    the streaming handler would need the same treatment, plus real handling
+    for a chunked/streaming response instead of one final web.Response).
+    Until that exists, this synthesizes one big "delta" from the already-
+    embedded, already-tested send_to_bot() -- the frontend still gets a
+    real answer, just without live per-token deltas.
+
+    Also worth keeping for whenever real streaming does get built: a real
+    upstream bug found live in the old HTTP-sidecar version, not
+    hypothetical -- the engine's /chat/stream failed to resolve ANY
+    provider through the /p/<profile>/ multiplex mirror (every bot except
+    "default"), always responding with an in-stream `event: error` ("No
+    LLM provider configured"), even with an explicit model/provider in the
+    request body. Confirmed not a multiplex-general issue: the same
+    request against the non-multiplexed default profile streamed real
+    deltas with correctly-resolved runtime.provider/model. Whether this
+    still applies once _handle_session_chat_stream is called in-process
+    (profile scoping works differently there, see _profile_scope) is
+    unverified -- check for it again before assuming it's fixed.
+    """
+    reply = await send_to_bot(profile, message)
+    yield "event: assistant.delta\n" + f"data: {json.dumps({'delta': reply})}\n\n"
+    yield "event: run.completed\n" + f"data: {json.dumps({'completed': True})}\n\n"
 
 
 async def get_bot_activity(profile: str) -> dict:
@@ -317,6 +369,7 @@ async def get_roster(include_hidden: bool = False) -> list[RosterEntry]:
     hidden = set(state.get("hidden") or [])
     avatars = state.get("avatars") or {}
     titles = state.get("titles") or {}
+    locked_models = state.get("locked_models") or {}
 
     visible = [p for p in profiles if p.get("name") and (include_hidden or p["name"] not in hidden)]
     activity = await asyncio.gather(*(get_bot_activity(p["name"]) for p in visible))
@@ -324,13 +377,18 @@ async def get_roster(include_hidden: bool = False) -> list[RosterEntry]:
     entries: list[RosterEntry] = []
     for p, latest in zip(visible, activity):
         name = p["name"]
+        # Prefer what we actually session-locked (see
+        # _lock_active_session_model's docstring) over Hermes' own
+        # profile-level provider field, which silently mangles any
+        # provider name it doesn't recognize as a built-in type.
+        locked = locked_models.get(name) or {}
         entries.append(
             RosterEntry(
                 name=name,
                 title=p.get("display_name") or titles.get(name) or _pretty_title(name),
                 description=p.get("description") or "",
-                model=p.get("model"),
-                provider=p.get("provider"),
+                model=locked.get("model") or p.get("model"),
+                provider=locked.get("provider") or p.get("provider"),
                 gateway_running=bool(p.get("gateway_running")),
                 is_active=bool(latest.get("is_active")),
                 is_hidden=name in hidden,
@@ -401,6 +459,26 @@ async def create_bot(body: BotCreate) -> RosterEntry:
         await _mutate_state(lambda d: d["titles"].__setitem__(name, body.title))
     if body.soul:
         await dash_send("PUT", f"/api/profiles/{name}/soul", {"content": body.soul})
+    if provider and model:
+        # Real bug found live: Hermes' own profile-level provider storage
+        # silently coerces any provider name it doesn't recognize as one
+        # of its built-in TYPEs (e.g. this platform's custom OpenAI-
+        # compatible endpoints like "hermes4-bitbots") down to
+        # "openrouter" -- confirmed by creating a bot and reading its
+        # profile back: requested "hermes4-bitbots" landed as
+        # "openrouter", an unconfigured provider with no API key, making
+        # the new bot appear broken/unresponsive despite creation itself
+        # reporting success. The SESSION-level model lock
+        # (POST /api/sessions/{id}/model, same endpoint
+        # _lock_active_session_model() already uses for existing bots)
+        # does NOT have this bug. So give the new bot its own canonical
+        # session immediately and lock the real provider onto it here,
+        # rather than trusting the profile field to hold it correctly.
+        try:
+            await _engine._ensure_bot_chat_session(name, _engine._api_headers(API_SERVER_KEY), None)
+            await _lock_active_session_model(name, provider, model)
+        except Exception:
+            pass  # best-effort -- profile creation above already succeeded
     roster = await get_roster(include_hidden=True)
     for entry in roster:
         if entry.name == name:
@@ -461,6 +539,16 @@ async def _lock_active_session_model(profile: str, provider: str, model: str) ->
     looking at, not just the next one. Best-effort: the profile default
     above has already been saved either way, so a failure here (e.g. no
     session yet) shouldn't fail the whole request.
+
+    Also records (provider, model) into state["locked_models"][profile] on
+    success -- real bug found live: Hermes' PROFILE-level provider field
+    silently coerces any provider name it doesn't recognize as a built-in
+    TYPE (e.g. this platform's custom OpenAI-compatible endpoints like
+    "hermes4-bitbots") down to "openrouter", so a bot actually running on
+    the right model still shows the wrong one in the roster if that field
+    is trusted. This SESSION-level lock doesn't have that bug -- confirmed
+    live by reading the lock response back. get_roster() prefers this
+    recorded value over the profile's own (unreliable) field.
     """
     state = _read_state()
     session_id = (state.get("active_sessions") or {}).get(profile)
@@ -469,10 +557,16 @@ async def _lock_active_session_model(profile: str, provider: str, model: str) ->
     base = _bot_base(profile)
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            await client.post(
+            resp = await client.post(
                 f"{base}/api/sessions/{session_id}/model",
                 json={"provider": provider, "model": model},
                 headers=_api_headers(),
+            )
+        if resp.status_code < 400:
+            await _mutate_state(
+                lambda d: d.setdefault("locked_models", {}).__setitem__(
+                    profile, {"provider": provider, "model": model}
+                )
             )
     except httpx.HTTPError:
         pass
@@ -580,6 +674,15 @@ async def bot_send(name: str, body: SendMessage) -> dict:
         raise HTTPException(status_code=400, detail="Message text required.")
     reply = await send_to_bot(name, text)
     return {"reply": reply}
+
+
+@app.post("/bots/{name}/messages/stream")
+async def bot_send_stream(name: str, body: SendMessage) -> StreamingResponse:
+    name = _validate_name(name)
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Message text required.")
+    return StreamingResponse(stream_to_bot(name, text), media_type="text/event-stream")
 
 
 # --------------------------------------------------------------------------
@@ -988,6 +1091,49 @@ class ToggleBody(BaseModel):
 @app.put("/mcp/servers/{name}/enabled")
 async def set_mcp_server_enabled(name: str, body: ToggleBody) -> dict:
     return await dash_send("PUT", f"/api/mcp/servers/{name}/enabled", body.model_dump())
+
+
+# --------------------------------------------------------------------------
+# MCP catalog -- the "Nous-approved" list of known integrations Hermes
+# ships with (GET /api/mcp/catalog, POST /api/mcp/catalog/install), the
+# same one the real desktop app's one-click "Add integration" uses. zBots'
+# own /mcp/servers above is a manual freeform add-a-server form; this is
+# the curated browse-and-click alternative for common tools (GitHub,
+# Notion, Figma, Slack, etc.) without hand-typing transport/URL details.
+# --------------------------------------------------------------------------
+
+@app.get("/mcp/catalog")
+async def get_mcp_catalog() -> Any:
+    return await dash_get("/api/mcp/catalog")
+
+
+class CatalogInstall(BaseModel):
+    name: str
+    env: dict[str, str] = {}
+    enable: bool = True
+
+
+@app.post("/mcp/catalog/install")
+async def install_mcp_catalog(body: CatalogInstall) -> dict:
+    return await dash_send("POST", "/api/mcp/catalog/install", body.model_dump())
+
+
+@app.post("/mcp/servers/{name}/auth")
+async def start_mcp_oauth(name: str) -> dict:
+    """Kicks off OAuth for an already-installed server and returns the
+    authorization_url to open plus a flow_id to poll -- mirrors the real
+    desktop app's inline-card OAuth connect button."""
+    return await dash_send("POST", f"/api/mcp/servers/{name}/auth", None)
+
+
+@app.get("/mcp/oauth/flows/{flow_id}")
+async def get_mcp_oauth_flow(flow_id: str) -> Any:
+    return await dash_get(f"/api/mcp/oauth/flows/{flow_id}")
+
+
+@app.delete("/mcp/oauth/flows/{flow_id}")
+async def cancel_mcp_oauth_flow(flow_id: str) -> dict:
+    return await dash_send("DELETE", f"/api/mcp/oauth/flows/{flow_id}", None)
 
 
 # --------------------------------------------------------------------------
