@@ -22,14 +22,23 @@ if [ ! -f "$HERMES_HOME/config.yaml" ]; then
         echo "ZBOTS_MODEL_BASE_URL and ZBOTS_MODEL_NAME are required to bootstrap the engine profile" >&2
         exit 1
     fi
+    # Shape verified against a real deployed instance: `hermes -z ... --cli`
+    # resolved and chatted through this exact config fine, so the provider
+    # key name itself doesn't matter (tried "default" first, "zbots" here
+    # only for clarity) -- the actual bug that produced "No inference
+    # provider configured" during testing was HERMES_HOME not being set on
+    # an ad-hoc process restart, not this file. `name`/`model`/
+    # `discover_models` mirror the shape a real working profile writes.
     cat > "$HERMES_HOME/config.yaml" <<EOF
 model:
-  provider: default
+  provider: zbots
   default: ${ZBOTS_MODEL_NAME}
 providers:
-  default:
-    type: openai
+  zbots:
+    name: zbots
     base_url: ${ZBOTS_MODEL_BASE_URL}
+    model: ${ZBOTS_MODEL_NAME}
+    discover_models: true
     api_key: ${ZBOTS_MODEL_API_KEY:-none}
     models:
       ${ZBOTS_MODEL_NAME}: {}

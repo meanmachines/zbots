@@ -27,8 +27,16 @@ COPY vendor/ /opt/zbots/vendor/
 # install (pip install -e .), which is what this actually is here in
 # effect -- a local, non-PyPI source tree -- so -e is the correct flag,
 # not a hack around the block.
+# aiohttp isn't in hermes-agent's own base dependency set -- it's pulled in
+# only by optional extras (messaging, slack, matrix, ...) that pin it to
+# 3.14.3, none of which this container installs. The api_server platform is
+# itself built on aiohttp.web though (see gateway/platforms/api_server.py),
+# and engine.py's embedding technique calls its handlers directly via
+# aiohttp.test_utils.make_mocked_request -- so it's a real, unconditional
+# runtime need here regardless of which extras group happens to list it.
+# Pinned to match what hermes-agent's own extras already vet.
 RUN pip install --no-cache-dir -e /opt/zbots/vendor/hermes-agent \
-    && pip install --no-cache-dir fastapi uvicorn httpx python-multipart
+    && pip install --no-cache-dir fastapi uvicorn httpx python-multipart aiohttp==3.14.3
 
 COPY backend/ /opt/zbots/backend/
 COPY frontend/ /opt/zbots/frontend/
