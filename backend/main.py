@@ -1201,19 +1201,27 @@ async def put_config_raw(body: ConfigRawBody) -> dict:
 
 @app.get("/ready")
 async def ready() -> dict:
-    """Readiness probe: 200 only when the Hermes dashboard is reachable.
-
-    The dashboard's /api/status is genuinely public (no session cookie), so
-    this is a real dependency check without touching auth state. Standalone
-    deployments on orchestrators that probe /ready get a truthful answer.
+    """Readiness probe: 200 once the embedded chat engine can actually run,
+    and the external dashboard too when one is configured (profile/MCP/
+    skills/env/cron admin CRUD still depends on it -- see engine.py's
+    module docstring for why that part isn't embedded yet). A deployment
+    with no dashboard configured is still real and ready for chat, so
+    admin-surface reachability is only checked when it applies.
     """
     try:
-        r = await _dash_client.get("/api/status")
-        if r.status_code < 400:
-            return {"ok": True}
-        return JSONResponse(status_code=503, content={"ok": False, "detail": f"dashboard status HTTP {r.status_code}"})
-    except httpx.HTTPError as exc:
-        return JSONResponse(status_code=503, content={"ok": False, "detail": f"dashboard unreachable: {exc}"})
+        _engine._get_adapter()
+    except Exception as exc:
+        return JSONResponse(status_code=503, content={"ok": False, "detail": f"engine not ready: {exc}"})
+
+    if os.environ.get("HERMES_DASHBOARD_URL"):
+        try:
+            r = await _dash_client.get("/api/status")
+            if r.status_code >= 400:
+                return JSONResponse(status_code=503, content={"ok": False, "detail": f"dashboard status HTTP {r.status_code}"})
+        except httpx.HTTPError as exc:
+            return JSONResponse(status_code=503, content={"ok": False, "detail": f"dashboard unreachable: {exc}"})
+
+    return {"ok": True}
 
 
 @app.get("/version")

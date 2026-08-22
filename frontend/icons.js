@@ -39,6 +39,9 @@ const ICONS = {
   chevron: '<path d="M9 6l6 6-6 6"/>',
   menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
   back: '<path d="M15 5 8 12l7 7"/>',
+  retry: '<path d="M4 10a8 8 0 1 1 2 5.7"/><path d="M4 4v6h6"/>',
+  download: '<path d="M12 4v10M7 10l5 5 5-5M4 20h16"/>',
+  copy: '<rect x="9" y="9" width="11" height="11" rx="1.5"/><path d="M5 15V5a1 1 0 0 1 1-1h10"/>',
 };
 
 function icon(name, size) {
