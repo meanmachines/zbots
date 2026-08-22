@@ -17,7 +17,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /opt/zbots
 COPY vendor/ /opt/zbots/vendor/
-RUN pip install --no-cache-dir /opt/zbots/vendor/hermes-agent \
+# hermes-agent's own build deliberately refuses a regular (non-editable)
+# pip install -- its setup.py raises RuntimeError("Building wheels or
+# sdists for hermes-agent is not supported. Hermes is distributed via the
+# shell installer, Docker image, or Nix.") specifically to steer people
+# away from this exact install shape. Their own suggested workaround for
+# anyone not using one of those three official paths is an editable
+# install (pip install -e .), which is what this actually is here in
+# effect -- a local, non-PyPI source tree -- so -e is the correct flag,
+# not a hack around the block.
+RUN pip install --no-cache-dir -e /opt/zbots/vendor/hermes-agent \
     && pip install --no-cache-dir fastapi uvicorn httpx python-multipart
 
 COPY backend/ /opt/zbots/backend/
