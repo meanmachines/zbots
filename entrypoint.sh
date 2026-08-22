@@ -49,10 +49,20 @@ htpasswd -bc /etc/nginx/.htpasswd-bots "$HERMES_DASHBOARD_BASIC_AUTH_USERNAME" "
 # sidecar architecture. That server has to actually run somewhere, and
 # nothing else in this container provides it, so start the headless backend
 # (`hermes serve` -- same gateway as `hermes dashboard`, minus the browser
-# and the web UI build main.py never needs) bound to loopback only. The
-# basic-auth env vars below are what its auth provider picks up; main.py
-# logs into it with the same pair (see _dashboard_login).
-(exec hermes serve --host 127.0.0.1 --port "${HERMES_DASHBOARD_PORT:-9119}" --skip-build --no-open) &
+# and the web UI build main.py never needs).
+#
+# Host is 0.0.0.0, matching the official image's own default (see
+# docker/s6-rc.d/dashboard/run upstream) -- NOT a loopback bind, on purpose.
+# The dashboard's real password-login/cookie auth gate (what main.py's
+# _dashboard_login actually speaks) only engages when auth_required is
+# True, which the server derives from the bind host: loopback binds are
+# treated as trusted-local and fall back to a different, session-token-only
+# auth path instead, which main.py doesn't implement -- tried 127.0.0.1
+# first and every dash_get/dash_send call 401'd for exactly this reason.
+# Binding 0.0.0.0 here is still container-internal only: nothing in the
+# Dockerfile publishes 9119 to the host, so it's unreachable from outside
+# regardless of which interface it listens on inside the container.
+(exec hermes serve --host 0.0.0.0 --port "${HERMES_DASHBOARD_PORT:-9119}" --skip-build --no-open) &
 DASHBOARD_PID=$!
 
 # FastAPI backend, loopback-only. nginx fronts it on 8080.
