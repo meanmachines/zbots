@@ -1,8 +1,13 @@
-"""Standalone MCP tool server giving a Hermes bot the ability to check on
-and message other bots on this same gateway -- the same primitive
-`hermes peer dm` already provides at the CLI level, exposed as callable
-tools so a model can use it mid-conversation instead of only a human
-running it by hand.
+"""Standalone MCP tool server giving a bot the ability to check on,
+message, and create other bots on this same gateway. The check/message
+primitives mirror what `hermes peer dm` already provides at the CLI
+level, exposed as callable tools so a model can use them mid-conversation
+instead of only a human running them by hand. create_bot exists because,
+without it, a model asked to make a new bot has no purpose-built way to
+do so -- found live, a bot fell back to exploring the filesystem and
+running CLI commands to hand-roll a profile, which took several minutes,
+left the bot broken (no explicit model/provider), and leaked the
+underlying engine's internals into what it told the user along the way.
 
 Deliberately a SEPARATE process from the Bots UI backend (main.py), not
 mounted onto it as a Starlette sub-app: mcp.streamable_http_app() needs its
@@ -26,18 +31,24 @@ import uvicorn
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
+import persona
+
 BOTS_UI_BASE = "http://127.0.0.1:8643"
 
 mcp = MCPServer(
     name="bot-supervisor",
     version="1.0.0",
     instructions=(
-        "Tools for supervising other Hermes bot profiles on this same "
-        "gateway. Workflow: list_bots() first to see who exists (free, no "
-        "LLM call) -> get_bot_status(name) for a real 'what are you "
-        "actually doing right now' answer from that bot -> message_bot"
-        "(name, message) to give it an instruction, ask something else, or "
-        "delegate a task. get_bot_status() and message_bot() are both real "
+        "Tools for supervising other bots on this same gateway, including "
+        "creating new ones. Workflow: list_bots() first to see who exists "
+        "(free, no LLM call) -> get_bot_status(name) for a real 'what are "
+        "you actually doing right now' answer from that bot -> "
+        "message_bot(name, message) to give it an instruction, ask "
+        "something else, or delegate a task. Need a bot that doesn't "
+        "exist yet? Use create_bot -- never try to create one by exploring "
+        "the filesystem or running CLI commands; that bypasses the real "
+        "bot registry, leaves it broken, and takes far longer than this "
+        "one call. get_bot_status() and message_bot() are both real "
         "conversation turns for the target bot (their reply becomes part "
         "of its own history), so use them deliberately, not as a cheap "
         "poll -- list_bots()'s last_message_preview/is_active fields are "
@@ -102,6 +113,41 @@ async def message_bot(name: str, message: str) -> str:
         r = await client.post(f"{BOTS_UI_BASE}/bots/{name}/messages", json={"text": message})
         r.raise_for_status()
         return r.json()["reply"]
+
+
+@mcp.tool()
+async def create_bot(name: str, title: str = "", description: str = "", persona_text: str = "") -> dict:
+    """Create a new bot on this gateway. This is the ONLY correct way to
+    do it -- it calls the real bot registry (POST /bots), which forces an
+    explicit model/provider at creation time to avoid a real bug where a
+    bot left to inherit one gets silently coerced onto a broken provider.
+    Trying to create a bot any other way (writing files, running CLI
+    commands to make a new profile, etc.) bypasses that safeguard, leaves
+    the bot broken, and is far slower than this one call.
+
+    persona_text is optional -- what this bot should act like (e.g. "a
+    research specialist who cites sources"). A branding-safety guardrail
+    (never mention this platform's underlying engine or its internals) is
+    appended automatically; you don't need to include it yourself.
+
+    Returns the new bot's roster entry: name, title, description, model,
+    provider.
+    """
+    soul = persona.with_branding_safety(persona_text)
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(
+            f"{BOTS_UI_BASE}/bots",
+            json={"name": name, "title": title, "description": description, "soul": soul},
+        )
+        r.raise_for_status()
+        entry = r.json()
+    return {
+        "name": entry.get("name"),
+        "title": entry.get("title"),
+        "description": entry.get("description"),
+        "model": entry.get("model"),
+        "provider": entry.get("provider"),
+    }
 
 
 def build_app():

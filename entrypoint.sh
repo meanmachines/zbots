@@ -48,6 +48,20 @@ mcp_servers:
 EOF
 fi
 
+# hermes-agent seeds its OWN default persona into a fresh profile's
+# SOUL.md -- literally "You are Hermes Agent, an intelligent AI assistant
+# created by Nous Research." Found live: the bootstrapped "default" bot
+# had never been given anything else, so every reply carried that exact
+# self-identification, directly contradicting zBots owning its public
+# identity. hermes-agent only auto-writes its own default when SOUL.md
+# is missing or still its legacy empty scaffold (_ensure_default_soul_md
+# in hermes_cli/config.py) -- writing real content here first means it's
+# recognized as user-customized and never touched again, on this or any
+# later boot.
+if [ ! -f "$HERMES_HOME/SOUL.md" ]; then
+    (cd /opt/zbots/backend && python3 -c "from persona import DEFAULT_SOUL; print(DEFAULT_SOUL)") > "$HERMES_HOME/SOUL.md"
+fi
+
 # Reuse the Hermes dashboard credential pair as the nginx basic-auth gate for
 # /bots, /bots-api and /bots-avatars -- identical behavior to the reference
 # hermes-agent-wrapper deployment. Regenerated every boot so a changed
