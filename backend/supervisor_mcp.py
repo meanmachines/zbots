@@ -46,8 +46,14 @@ mcp = MCPServer(
     name="bot-supervisor",
     version="1.0.0",
     instructions=(
-        "Tools for supervising other bots on this same gateway, including "
-        "creating new ones. Workflow: list_bots() first to see who exists "
+        "The user's OWN bots on this gateway can talk to each other -- if "
+        "asked to ask/tell/message/check with a name you don't already "
+        "know, ALWAYS call list_bots() first to see whether it's one of "
+        "your own bots before assuming it's an external contact you have "
+        "no way to reach. Guessing wrong here means telling the user you "
+        "can't do something you actually can. Tools for supervising other "
+        "bots on this same gateway, including creating new ones. "
+        "Workflow: list_bots() first to see who exists "
         "(free, no LLM call) -> get_bot_status(name) for a real 'what are "
         "you actually doing right now' answer from that bot -> "
         "message_bot(name, message) for a quick question you're willing "
