@@ -6,6 +6,25 @@ tagged on `main`.
 
 ## [Unreleased]
 
+### Added
+- OpenRouter as a selectable provider in the model switcher (the dropdown
+  under a bot's name) and the Models page, alongside every other
+  provider, so it can be switched to on demand instead of sitting unused.
+  OpenRouter is one of hermes-agent's own native routing modes (resolved
+  through `OPENROUTER_API_KEY` at call time), not a custom OpenAI-
+  compatible endpoint -- adding it the normal "Add provider" way is
+  blocked on purpose (`_reserved_provider_ids`), since that form's own
+  base_url/api_key fields would be silently ignored for this name. Wired
+  in as a `providers.openrouter` entry carrying only a curated models
+  list (Claude Sonnet 5, Claude Opus 5, GPT-5.5, Gemini 2.5 Pro,
+  DeepSeek R1, Grok 4.5) and no credentials of its own, so real auth
+  still goes through the native env-var path. `entrypoint.sh`'s bootstrap
+  now writes this same block on a fresh deploy, but only when
+  `OPENROUTER_API_KEY` is actually set -- offering a choice that would
+  just fail when picked helps no one. Note: `OPENROUTER_API_KEY` is not
+  currently set on zbots-dev, so the option is selectable but won't
+  complete a real request until a key is added.
+
 ### Changed
 - Replaced the tool-status indicator's write-then-erase bubble pattern
   with a collapsible "thinking" panel. Real bug found live right after

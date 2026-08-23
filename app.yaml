@@ -17,6 +17,8 @@ env:
     required: true
   ZBOTS_MODEL_API_KEY:
     required: false
+  OPENROUTER_API_KEY:
+    required: false
   HERMES_DASHBOARD_URL:
     required: false
   HERMES_API_SERVER_URL:

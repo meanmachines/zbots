@@ -48,6 +48,31 @@ providers:
     api_key: ${ZBOTS_MODEL_API_KEY:-none}
     models:
       ${ZBOTS_MODEL_NAME}: {}
+EOF
+    # OpenRouter is one of hermes-agent's own native routing modes,
+    # resolved through OPENROUTER_API_KEY at call time -- NOT a
+    # custom-endpoint entry, so this block deliberately carries no
+    # base_url/api_key of its own (see main.py's _reserved_provider_ids
+    # for why the UI itself blocks adding a provider literally named
+    # "openrouter" the normal way). It only exists to give OpenRouter a
+    # models catalog, so it shows up in the model switcher/Models page
+    # like every other provider -- and only when the key is actually
+    # set, so a fresh deploy without one doesn't offer a choice that
+    # would just fail when picked.
+    if [ -n "$OPENROUTER_API_KEY" ]; then
+        cat >> "$HERMES_HOME/config.yaml" <<EOF
+  openrouter:
+    name: openrouter
+    models:
+      anthropic/claude-sonnet-5: {}
+      anthropic/claude-opus-5: {}
+      openai/gpt-5.5: {}
+      google/gemini-2.5-pro: {}
+      deepseek/deepseek-r1: {}
+      x-ai/grok-4.5: {}
+EOF
+    fi
+    cat >> "$HERMES_HOME/config.yaml" <<EOF
 mcp_servers:
   bot-supervisor:
     url: http://127.0.0.1:8645/mcp
