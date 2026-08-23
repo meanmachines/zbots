@@ -17,6 +17,7 @@ const ICONS = {
   files: '<path d="M6 3h9l5 5v13H6V3Z"/><path d="M15 3v5h5"/>',
   env: '<path d="m5 4 3 8-3 8M19 4h-9M19 20h-9M13 12h6"/>',
   webhooks: '<circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8.2 7.2 15.8 16.8M15.8 7.2 8.2 16.8M8.5 6h7"/>',
+  connectors: '<path d="M9 15 4.5 19.5a2.1 2.1 0 0 1-3-3L6 12"/><path d="M15 9l4.5-4.5a2.1 2.1 0 0 1 3 3L18 12"/><path d="m9 15 6-6"/><path d="M13 3l3 3M18 8l3 3"/>',
   logs: '<path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h4"/>',
   system: '<rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M9 20h6M12 16v4"/>',
 

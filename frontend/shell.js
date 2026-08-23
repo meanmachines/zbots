@@ -18,6 +18,7 @@ const NAV_GROUPS = [
     items: [
       { id: "models", label: "Models", href: "/bots/models.html", icon: "models" },
       { id: "mcp", label: "MCP Servers", href: "/bots/mcp.html", icon: "mcp" },
+      { id: "connectors", label: "Connectors", href: "/bots/connectors.html", icon: "connectors" },
       { id: "config", label: "Config", href: "/bots/config.html", icon: "config" },
       { id: "env", label: "Environment", href: "/bots/env.html", icon: "env" },
     ],

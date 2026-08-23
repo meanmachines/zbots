@@ -1079,6 +1079,45 @@ async def list_models() -> dict:
     return {"models": out}
 
 
+# --------------------------------------------------------------------------
+# Connectors (Discord/Telegram/WhatsApp/Slack/...) -- thin proxy over
+# hermes-agent's own real messaging-platform API (GET/PUT
+# /api/messaging/platforms[/{id}]), the same native mechanism the desktop
+# app's own Channels page uses. zBots adds nothing here beyond auth/shape --
+# the platform catalog (every id in gateway.config.Platform, plus any
+# installed plugin platform), credential storage (.env-backed, same
+# convention as a custom provider's key_env), and connect/test logic are
+# all real, already-built hermes-agent code.
+# --------------------------------------------------------------------------
+
+class ConnectorUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    env: dict[str, str] = {}
+    clear_env: list[str] = []
+
+
+@app.get("/connectors")
+async def list_connectors() -> Any:
+    return await dash_get("/api/messaging/platforms")
+
+
+@app.put("/connectors/{platform_id}")
+async def update_connector(platform_id: str, body: ConnectorUpdate) -> dict:
+    result = await dash_send("PUT", f"/api/messaging/platforms/{platform_id}", body.model_dump())
+    # Enabling/disabling a platform is gateway-process config (hermes
+    # serve's own startup sequence spins up each enabled platform's
+    # connector), not the embedded chat engine's -- unlike a provider/model
+    # change, this has nothing for invalidate_adapter() to reset. The real
+    # API's own "pending_restart" state (surfaced in the response) already
+    # tells the caller a hermes-serve restart is what's actually needed.
+    return result
+
+
+@app.post("/connectors/{platform_id}/test")
+async def test_connector(platform_id: str) -> dict:
+    return await dash_send("POST", f"/api/messaging/platforms/{platform_id}/test", None)
+
+
 @app.get("/peers")
 async def list_peers() -> dict:
     cfg = await dash_get("/api/config")

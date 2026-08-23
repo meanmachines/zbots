@@ -193,6 +193,7 @@ input:focus, textarea:focus, select:focus {
 }
 .pill.on { background: color-mix(in srgb, var(--success) 18%, transparent); color: var(--success); }
 .pill.off { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); }
+.pill.warn { background: color-mix(in srgb, #f5a524 18%, transparent); color: #f5a524; }
 
 /* Plain status dot -- used in place of a text pill wherever a bot's
    online/offline state just needs a glance, not a label. */
