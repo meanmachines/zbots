@@ -35,6 +35,11 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
+try:
+    from . import resilience
+except ImportError:
+    import resilience
+
 VENDOR_ROOT = Path(__file__).resolve().parent.parent / "vendor" / "hermes-agent"
 if str(VENDOR_ROOT) not in sys.path:
     sys.path.insert(0, str(VENDOR_ROOT))
@@ -169,12 +174,14 @@ def _api_headers(api_server_key: str) -> dict[str, str]:
 # just calling handlers in-process instead of over loopback HTTP. The two
 # bugs the retry/rollover logic works around both live inside the engine's
 # own agent_init.py/api_server.py, so they still happen here -- calling the
-# same code in-process instead of over HTTP does not fix them.
+# same code in-process instead of over HTTP does not fix them. What counts
+# as a failure worth retrying, and how, lives in resilience.py -- this
+# module only owns the session bookkeeping (creating/finding/rolling over
+# sessions) that those decisions get applied against.
 # --------------------------------------------------------------------------
 
 _BOT_SESSION_PREFIX = "[Bots UI]"
 _BOT_SESSION_SUFFIX_RE = re.compile(r"^\[Bots UI\] ([a-zA-Z0-9_-]+)(?: #(\d+))?$")
-_STREAM_CORRUPTION_RE = re.compile(r"(<unused\d+>\s*){3,}")
 
 
 def _bot_chat_title(profile: str, n: int = 1) -> str:
@@ -188,16 +195,6 @@ def _bot_session_rollover_n(title: str, profile: str) -> Optional[int]:
     if not m or m.group(1) != profile:
         return None
     return int(m.group(2)) if m.group(2) else 1
-
-
-def _is_corrupted_reply(text: str) -> bool:
-    """Detects the garbage-token artifact from a known upstream bug where
-    the engine cancels its internal LLM stream after ~1.5s of silence
-    during prefill -- see vendor/VENDORED_COMMIT.md and the upstream issue
-    tracked there. The corrupted reply is otherwise indistinguishable from
-    a real one, so this is the only place it can be caught.
-    """
-    return bool(_STREAM_CORRUPTION_RE.search(text or ""))
 
 
 async def _list_bot_sessions(profile: str, headers: dict) -> list[dict]:
@@ -274,23 +271,15 @@ async def send_to_bot(
 ) -> tuple[str, str]:
     """Send one message to a bot's active session; return (reply_text, session_id).
 
-    Real, recurring bug (not a one-off, lives inside the engine's own
-    agent_init.py/api_server.py): a session that answers correctly on its
-    first turn can start failing on every turn after -- once a session's
-    model field gets persisted as a real provider model string (which
-    happens automatically after its first turn), the next turn's resolver
-    re-reads that stored string and tries to resolve it as a route alias
-    instead of a raw model id, fails, and falls through to an unconfigured
-    placeholder.
-
-    Self-healing instead: on failure, roll over to a brand-new session
-    (kept, not deleted) and retry once. get_bot_messages merges every
-    rollover back into one continuous thread, invisible to the user beyond
-    the reply arriving from a "new" session under the hood.
-
-    Separately, a successful call can still carry a corrupted reply -- see
-    _is_corrupted_reply. That's not a wedged session, just a bad single
-    turn, so the fix is a plain retry on the same session, not a rollover.
+    The failure classes this recovers from -- and exactly what recovering
+    means for each -- are documented in resilience.py, not here. This
+    function only runs the attempt sequence: chat, ask resilience.evaluate
+    what the outcome means, act on it, and (for a rollover) hand the check
+    a second chance to fire again on the retried attempt. A rollover
+    session is kept, not deleted -- get_bot_messages merges every
+    rollover back into one continuous thread, so retrying under the hood
+    is invisible to the user beyond the reply arriving from a "new"
+    session.
     """
     headers = _api_headers(api_server_key)
     session_id, all_sessions = await _ensure_bot_chat_session(profile, headers, active_session_id)
@@ -306,25 +295,34 @@ async def send_to_bot(
                 match_info={"session_id": sid},
             )
 
+    def _reply_of(body: Optional[dict]) -> str:
+        msg = (body or {}).get("message")
+        return str(msg.get("content") or "") if isinstance(msg, dict) else ""
+
+    async def _rollover_and_retry(sid: str) -> tuple[str, int, Optional[dict]]:
+        sid = await _roll_over_bot_session(profile, headers, all_sessions)
+        status, body = await _chat(sid)
+        return sid, status, body
+
     status, body = await _chat(session_id)
-    if status >= 500:
-        session_id = await _roll_over_bot_session(profile, headers, all_sessions)
-        status, body = await _chat(session_id)
+    decision = resilience.evaluate(status=status, body=body, reply="")
+    if decision.mode is resilience.RetryMode.ROLLOVER:
+        session_id, status, body = await _rollover_and_retry(session_id)
     if status >= 400:
         raise RuntimeError(f"chat failed: {status} {body}")
-    msg = (body or {}).get("message")
-    reply = str(msg.get("content") or "") if isinstance(msg, dict) else ""
+    reply = _reply_of(body)
 
-    if _is_corrupted_reply(reply):
+    decision = resilience.evaluate(status=status, body=body, reply=reply)
+    if decision.mode is resilience.RetryMode.SAME_SESSION:
         status, body = await _chat(session_id)
-        if status >= 500:
-            session_id = await _roll_over_bot_session(profile, headers, all_sessions)
-            status, body = await _chat(session_id)
+        follow_up = resilience.evaluate(status=status, body=body, reply="")
+        if follow_up.mode is resilience.RetryMode.ROLLOVER:
+            session_id, status, body = await _rollover_and_retry(session_id)
         if status >= 400:
             raise RuntimeError(f"chat retry failed: {status} {body}")
-        msg = (body or {}).get("message")
-        retried = str(msg.get("content") or "") if isinstance(msg, dict) else ""
-        if not _is_corrupted_reply(retried):
+        retried = _reply_of(body)
+        retried_decision = resilience.evaluate(status=status, body=body, reply=retried)
+        if retried_decision.mode is not resilience.RetryMode.SAME_SESSION:
             reply = retried
         # Both attempts corrupted: return the first one rather than loop
         # forever -- the user still sees something.

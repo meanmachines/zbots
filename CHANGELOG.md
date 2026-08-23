@@ -4,6 +4,20 @@ All notable changes to zBots are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); versions are
 tagged on `main`.
 
+## [Unreleased]
+
+### Added
+- `backend/resilience.py`: the chat-retry logic's failure checks
+  (server-error rollover, corrupted-reply retry) are now independent,
+  pluggable, individually unit-tested functions instead of inline
+  conditionals in `engine.py`'s `send_to_bot()`.
+- `backend/supervisor_mcp.py` (the `bot-supervisor` MCP tool server) now
+  actually runs -- it existed in the repo but nothing started it. Wired
+  into `entrypoint.sh` as a third in-container process and registered in
+  the bootstrapped `config.yaml`'s `mcp_servers`.
+- `tests/test_resilience.py`: direct unit coverage for the resilience
+  checks, no mocking required.
+
 ## [0.1.0] - 2026-08-23
 
 First tagged release. zBots as a standalone product: its own container,

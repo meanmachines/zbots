@@ -42,6 +42,9 @@ providers:
     api_key: ${ZBOTS_MODEL_API_KEY:-none}
     models:
       ${ZBOTS_MODEL_NAME}: {}
+mcp_servers:
+  bot-supervisor:
+    url: http://127.0.0.1:8645/mcp
 EOF
 fi
 
@@ -78,8 +81,16 @@ DASHBOARD_PID=$!
 (cd /opt/zbots/backend && exec python -m uvicorn main:app --host 127.0.0.1 --port "${BOTS_UI_PORT:-8643}") &
 BACKEND_PID=$!
 
-# Stop the other two if nginx exits so the container signals failure instead
+# bot-supervisor MCP tool server (backend/supervisor_mcp.py) -- gives a bot
+# the ability to list/message/check-status-on other bots on this same
+# gateway. Loopback-only, registered in the bootstrapped config.yaml above
+# so the engine actually connects to it; was present in the repo but never
+# started by anything, so it sat dormant until now.
+(cd /opt/zbots/backend && exec python -m uvicorn supervisor_mcp:app --host 127.0.0.1 --port 8645) &
+SUPERVISOR_PID=$!
+
+# Stop the others if nginx exits so the container signals failure instead
 # of hanging around with a half-dead process tree.
-trap 'kill "$BACKEND_PID" "$DASHBOARD_PID" 2>/dev/null || true' EXIT
+trap 'kill "$BACKEND_PID" "$DASHBOARD_PID" "$SUPERVISOR_PID" 2>/dev/null || true' EXIT
 
 nginx -g 'daemon off;'

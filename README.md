@@ -33,7 +33,7 @@ See [docs/CREDITS.md](./docs/CREDITS.md) for open-source acknowledgments.
 
 The underlying engine has a real chat-session bug where a session can fail
 every turn after its first -- hits hardest on self-hosted/custom providers,
-which is the whole point of this project. `backend/main.py`'s
+which is the whole point of this project. `backend/engine.py`'s
 `send_to_bot()` works around it: each bot's session id is tracked in local
 state, and a failed turn rolls over to a fresh session (kept, not deleted)
 rather than surfacing the error. `get_bot_messages()` merges a bot's whole
@@ -42,6 +42,37 @@ invisible from the UI. See [docs/CREDITS.md](./docs/CREDITS.md) and the
 `send_to_bot()` docstring for the full investigation and upstream tracking
 links -- six workarounds were tried and ruled out live before landing on
 this one.
+
+What actually counts as a failure worth retrying, and how, lives in
+`backend/resilience.py` as a small set of independent checks (each one a
+plain function: given a chat attempt's outcome, decide none/same-session-
+retry/rollover) rather than being buried inline in `send_to_bot()`. A new
+provider- or deployment-specific failure signature plugs in as one more
+entry in `RESILIENCE_CHECKS`; the attempt sequencing in `engine.py` doesn't
+change to pick it up. `tests/test_resilience.py` covers each check directly
+-- no mocking needed, since the checks are pure functions with no session
+dependency of their own.
+
+### Extending zBots: the plugin-registry pattern
+
+Both of the pieces above are instances of the same idea: a Python-native,
+explicit registry for the parts of zBots that are genuinely swappable,
+inspired by (not dependent on) DeepSeek Harness's Cordis plugin kernel --
+model adapters, tool registry, session logic, and the agent loop as
+independent, registrable units, without pulling in a second language
+runtime to get there.
+
+- **Tools**: `backend/supervisor_mcp.py` runs as its own MCP server
+  (`bot-supervisor`, registered in the bootstrapped `config.yaml`),
+  exposing `list_bots`/`get_bot_status`/`message_bot` so a bot can
+  supervise other bots on the same gateway. New cross-bot capabilities are
+  new `@mcp.tool()` functions there -- the MCP SDK's own decorator is
+  already the registry; nothing extra was needed on top of it.
+- **Session**: `backend/resilience.py`'s `RESILIENCE_CHECKS` list, as
+  described above.
+
+Both are additive -- registering something new never requires touching the
+core call paths in `main.py` or `engine.py`.
 
 ## Running it
 
