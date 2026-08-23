@@ -194,6 +194,16 @@ input:focus, textarea:focus, select:focus {
 .pill.on { background: color-mix(in srgb, var(--success) 18%, transparent); color: var(--success); }
 .pill.off { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); }
 
+/* Plain status dot -- used in place of a text pill wherever a bot's
+   online/offline state just needs a glance, not a label. */
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
+}
+
 .row-actions { display: flex; gap: 0.35rem; justify-content: flex-end; }
 .row-actions button {
   background: transparent;
@@ -459,6 +469,13 @@ input:focus, textarea:focus, select:focus {
   height: 9px;
   border-radius: 50%;
   background: var(--success);
+  position: absolute;
+  right: 0.4rem;
+  top: 0.4rem;
+  box-shadow: 0 0 0 2px var(--bg);
+}
+
+.offline-dot {
   position: absolute;
   right: 0.4rem;
   top: 0.4rem;

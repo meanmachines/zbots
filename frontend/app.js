@@ -191,12 +191,6 @@ function rosterRow(entry) {
   const title = document.createElement("div");
   title.className = "roster-row-title";
   title.textContent = entry.title;
-  if (entry.gateway_running === false) {
-    const off = document.createElement("span");
-    off.className = "pill off";
-    off.textContent = "offline";
-    title.appendChild(off);
-  }
   const time = document.createElement("div");
   time.className = "roster-row-time";
   time.textContent = timeAgo(entry.last_active);
@@ -210,6 +204,10 @@ function rosterRow(entry) {
   if (entry.is_active) {
     const dot = document.createElement("div");
     dot.className = "active-dot";
+    row.appendChild(dot);
+  } else if (entry.gateway_running === false) {
+    const dot = document.createElement("div");
+    dot.className = "status-dot offline-dot";
     row.appendChild(dot);
   }
 
