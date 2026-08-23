@@ -6,6 +6,37 @@ tagged on `main`.
 
 ## [Unreleased]
 
+### Changed
+- Replaced the tool-status indicator's write-then-erase bubble pattern
+  with a collapsible "thinking" panel. Real bug found live right after
+  that indicator shipped: a turn with several tool calls repeatedly
+  created a bubble on `assistant.delta`, then deleted it whenever
+  `tool.started`/`tool.progress` followed (needed since narration text
+  can stream before a tool call, see that fix's own comment) -- with
+  multiple tool cycles in one turn that's a repeated write-then-erase of
+  a bubble-shaped thing, which read as flickering. Fix restructures
+  around a fact confirmed by reading the real handler
+  (`gateway/platforms/api_server.py`): `assistant.completed`'s `content`
+  field always carries the full, authoritative final reply, regardless
+  of how many delta/tool cycles preceded it -- so it's now the ONLY
+  source ever rendered as the visible answer, appended exactly once.
+  Everything else that happens mid-turn (tool calls, reasoning ticks)
+  goes into a `<details>`-based panel, collapsed by default with a
+  live-updating one-line summary ("Checking bots…", "Responding…"),
+  expandable to a full step log -- same "thought for a bit" affordance
+  as a desktop chat app. Verified live with a real multi-tool-call turn
+  (`list_routines` + `message_bot` + `list_bots` + `message_bot` again,
+  8 logged steps): the visible message list stayed byte-identical
+  through the entire in-progress phase, with the one real answer
+  appearing once at the end.
+- `persona.py`'s `RESPONSE_STYLE` now also asks for short, conversational
+  replies -- a couple of sentences for most things -- with bullet points
+  or short headers for anything that genuinely has several details to
+  convey, instead of long unstructured paragraphs. Rolled out the same
+  way the rest of `RESPONSE_STYLE` reaches existing bots (it's appended
+  automatically the next time a soul is fetched through
+  `with_branding_safety`).
+
 ### Fixed
 - `_process_sse_frame`'s stale-model-lock detection only inspected
   `assistant.delta` frames -- real bug found live, immediately after a

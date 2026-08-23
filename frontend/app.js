@@ -815,20 +815,86 @@ function toolStatusLabel(toolName, preview, args) {
   }
 }
 
-function showToolStatus(text) {
+// Collapsible "thinking" panel -- accumulates tool-call/reasoning activity
+// for one in-flight turn as a scrollable, collapsed-by-default log instead
+// of ever rendering it as the visible reply. Real bug this replaces: the
+// previous design rendered each assistant.delta live into what looked
+// like the final answer bubble, then deleted that bubble whenever a tool
+// call followed (see toolStatusLabel's own comment above) -- with several
+// tool calls in one turn that's a repeated write-then-erase of a
+// bubble-shaped thing, which reads as flickering (reported live). Fix:
+// never show in-progress text as if it were the answer. While a turn
+// runs, only two things are visible -- the existing typing indicator
+// (nothing has happened yet) and this panel's own live summary line
+// (something is happening, and what); its log is opt-in detail behind the
+// native <details> toggle, same pattern as a desktop chat app's "thought
+// for Xs" affordance. The real final answer always comes from
+// assistant.completed's own authoritative `content` field (see
+// engine.py's _process_sse_frame docstring -- the same field the
+// non-streaming path already used), rendered exactly once, so it can
+// never be shown and then discarded.
+let thinkingLastLine = null;
+
+function getThinkingPanel() {
+  let wrap = document.getElementById("thinking-wrap");
+  if (wrap) return wrap;
   const pane = document.getElementById("messages-pane");
-  let el = document.getElementById("tool-status");
-  if (!el) {
-    el = document.createElement("div");
-    el.id = "tool-status";
-    pane.appendChild(el);
-  }
-  el.textContent = text + "...";
+  wrap = document.createElement("div");
+  wrap.id = "thinking-wrap";
+  wrap.className = "msg bot msg-pop";
+  wrap.innerHTML =
+    '<details class="thinking-panel" id="thinking-panel">' +
+    '<summary id="thinking-summary">Thinking…</summary>' +
+    '<div class="thinking-log" id="thinking-log"></div>' +
+    "</details>";
+  pane.appendChild(wrap);
   pane.scrollTop = pane.scrollHeight;
+  thinkingLastLine = null;
+  return wrap;
 }
 
-function hideToolStatus() {
-  document.getElementById("tool-status")?.remove();
+function setThinkingSummary(text) {
+  getThinkingPanel();
+  document.getElementById("thinking-summary").textContent = text;
+}
+
+function logThinkingStep(text) {
+  getThinkingPanel();
+  setThinkingSummary(text);
+  if (text === thinkingLastLine) return; // dedupe consecutive repeats (e.g. several "Thinking" ticks in a row)
+  thinkingLastLine = text;
+  const log = document.getElementById("thinking-log");
+  const line = document.createElement("div");
+  line.className = "thinking-step";
+  line.textContent = text;
+  log.appendChild(line);
+  const panel = document.getElementById("thinking-panel");
+  if (panel.open) {
+    const pane = document.getElementById("messages-pane");
+    pane.scrollTop = pane.scrollHeight;
+  }
+}
+
+// Called once the turn is over (success or error) -- swaps the live,
+// pulsing summary line for a static one so a collapsed panel doesn't look
+// like it's still working after the fact.
+function finalizeThinkingPanel() {
+  const summary = document.getElementById("thinking-summary");
+  if (summary) summary.textContent = "Show steps";
+  thinkingLastLine = null;
+}
+
+function appendFinalBotMessage(content) {
+  const pane = document.getElementById("messages-pane");
+  const div = document.createElement("div");
+  div.className = "msg bot msg-pop";
+  const body = document.createElement("div");
+  body.className = "msg-body";
+  body.innerHTML = renderMarkdown(content);
+  div.appendChild(body);
+  pane.appendChild(div);
+  pane.scrollTop = pane.scrollHeight;
+  return div;
 }
 
 function appendOptimisticUserMessage(text) {
@@ -844,16 +910,6 @@ function appendOptimisticUserMessage(text) {
   pane.scrollTop = pane.scrollHeight;
 }
 
-function appendStreamingBotMessage() {
-  const pane = document.getElementById("messages-pane");
-  const div = document.createElement("div");
-  div.id = "streaming-bot-msg";
-  div.className = "msg bot msg-pop";
-  pane.appendChild(div);
-  pane.scrollTop = pane.scrollHeight;
-  return div;
-}
-
 // Consumes the backend's SSE proxy (see stream_to_bot() in main.py) and
 // appends each assistant.delta live instead of waiting for the full reply
 // to generate server-side -- this is what actually fixes the "goes into
@@ -866,9 +922,9 @@ function appendStreamingBotMessage() {
 // on this end.
 async function streamBotReply(botName, text, isStillActive) {
   // Real bug found live: without the isStillActive gate below, a delta
-  // arriving after the user switched to a DIFFERENT chat would call
-  // appendStreamingBotMessage() against whatever #messages-pane currently
-  // shows -- i.e. bot A's reply visibly streaming into bot B's window.
+  // arriving after the user switched to a DIFFERENT chat would render
+  // status/log updates against whatever #messages-pane currently shows --
+  // i.e. bot A's reply visibly streaming into bot B's window.
   // The old blocking send never had this problem because it never touched
   // the DOM until the final, already-gated loadMessages() call. The fetch
   // itself is never aborted on a switch-away -- the reply still needs to
@@ -890,8 +946,6 @@ async function streamBotReply(botName, text, isStillActive) {
   const reader = res.body.getReader();
   const decoder = new TextDecoder("utf-8");
   let buf = "";
-  let bubble = null;
-  let sawDelta = false;
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -913,47 +967,37 @@ async function streamBotReply(botName, text, isStillActive) {
       } catch (_) {
         continue;
       }
-      if (eventName === "assistant.delta" && payload.delta && isStillActive()) {
-        if (!sawDelta) {
-          hideTypingIndicator();
-          hideToolStatus();
-          bubble = appendStreamingBotMessage();
-          sawDelta = true;
+      if (!isStillActive()) continue;
+      if (eventName === "assistant.delta" && payload.delta) {
+        // Never rendered live (see getThinkingPanel's own comment) -- just
+        // flips the ambient status to something honest while tokens are
+        // actually arriving.
+        hideTypingIndicator();
+        setThinkingSummary("Responding…");
+      } else if (eventName === "tool.started") {
+        hideTypingIndicator();
+        logThinkingStep(toolStatusLabel(payload.tool_name, payload.preview, payload.args));
+      } else if (eventName === "tool.progress" && payload.tool_name === "_thinking") {
+        hideTypingIndicator();
+        logThinkingStep("Thinking");
+      } else if (eventName === "assistant.completed") {
+        // The one and only source of the visible reply -- see this
+        // function's own header comment for why deltas never render
+        // directly. content is the real handler's full, final text
+        // regardless of how many delta/tool cycles preceded it.
+        hideTypingIndicator();
+        finalizeThinkingPanel();
+        if (typeof payload.content === "string" && payload.content.trim()) {
+          appendFinalBotMessage(payload.content);
         }
-        bubble.textContent += payload.delta;
-        const pane = document.getElementById("messages-pane");
-        pane.scrollTop = pane.scrollHeight;
-      } else if (eventName === "tool.started" && isStillActive()) {
-        // Real bug found live: delta text narrating an upcoming tool call
-        // ("I'll use the message_bot tool to...") streams BEFORE
-        // tool.started, so a naive "only before any delta" guard here
-        // never fires -- the narration bubble was already created and
-        // sawDelta already true by the time the tool call itself starts.
-        // That narration was never the real answer, so discard it (same
-        // thing the persona's own response-style guardrail asks the
-        // model not to write in the first place -- this is the
-        // deterministic backstop for when it does anyway) and show the
-        // clean tool-status line instead; a fresh bubble opens for
-        // whatever delta run follows the tool call.
-        if (bubble) {
-          bubble.remove();
-          bubble = null;
-          sawDelta = false;
-        }
-        showToolStatus(toolStatusLabel(payload.tool_name, payload.preview, payload.args));
-      } else if (eventName === "tool.progress" && payload.tool_name === "_thinking" && isStillActive()) {
-        if (bubble) {
-          bubble.remove();
-          bubble = null;
-          sawDelta = false;
-        }
-        showToolStatus("Thinking");
-      } else if ((eventName === "run.completed" || eventName === "error") && isStillActive()) {
-        hideToolStatus();
+      } else if (eventName === "run.completed" || eventName === "error") {
+        hideTypingIndicator();
+        finalizeThinkingPanel();
       }
     }
   }
-  hideToolStatus();
+  hideTypingIndicator();
+  finalizeThinkingPanel();
 }
 
 function extractText(row) {
@@ -1079,7 +1123,7 @@ async function sendComposerMessage() {
     if (isStillActive()) {
       hideTypingIndicator();
       document.getElementById("optimistic-user-msg")?.remove();
-      document.getElementById("streaming-bot-msg")?.remove();
+      document.getElementById("thinking-wrap")?.remove();
       input.value = text;
     }
     toast(`Send to ${target.id} failed: ` + e.message);
