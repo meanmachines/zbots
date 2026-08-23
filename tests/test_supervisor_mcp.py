@@ -89,6 +89,9 @@ async def test_delegate_task_tool_returns_immediately_without_waiting_for_the_wo
             await release.wait()
         return _fake_response({"reply": "ok"})
 
+    async def _get(url):
+        return _fake_response([{"name": "worker"}])
+
     class _FakeClient:
         async def __aenter__(self):
             return self
@@ -96,6 +99,7 @@ async def test_delegate_task_tool_returns_immediately_without_waiting_for_the_wo
         async def __aexit__(self, *exc):
             return False
 
+        get = staticmethod(_get)
         post = staticmethod(_slow_post)
 
     with patch.object(sup.httpx, "AsyncClient", lambda **kw: _FakeClient()):
@@ -112,3 +116,49 @@ async def test_delegate_task_tool_returns_immediately_without_waiting_for_the_wo
     # doesn't leak a pending task into the next one.
     release.set()
     await asyncio.sleep(0)
+
+
+# ---------------------------------------------------------------------------
+# _require_bot -- the existence check. Real bug found live: messaging a name
+# that isn't a real bot used to silently "succeed" (POST /bots/{name}/messages
+# auto-creates a session under any name and answers anyway, no actual bot
+# behind it), so a typo'd or hallucinated name looked like a real reply
+# instead of a clear failure.
+# ---------------------------------------------------------------------------
+
+def _roster_client(names):
+    async def _get(url):
+        return _fake_response([{"name": n} for n in names])
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        get = staticmethod(_get)
+
+    return _FakeClient()
+
+
+@pytest.mark.asyncio
+async def test_require_bot_passes_silently_for_a_real_name():
+    with patch.object(sup.httpx, "AsyncClient", lambda **kw: _roster_client(["worker", "default"])):
+        await sup._require_bot("worker")  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_require_bot_suggests_a_close_match():
+    with patch.object(sup.httpx, "AsyncClient", lambda **kw: _roster_client(["mandy", "default"])):
+        with pytest.raises(sup.BotNotFound) as exc_info:
+            await sup._require_bot("mandi")
+    assert "mandy" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_require_bot_reports_no_match_when_nothing_close():
+    with patch.object(sup.httpx, "AsyncClient", lambda **kw: _roster_client(["default"])):
+        with pytest.raises(sup.BotNotFound) as exc_info:
+            await sup._require_bot("zzzzzz")
+    assert "no similarly" in str(exc_info.value)

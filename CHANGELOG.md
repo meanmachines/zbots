@@ -7,6 +7,23 @@ tagged on `main`.
 ## [Unreleased]
 
 ### Added
+- Frontend: a bot's chat now shows only each exchange's real final
+  answer, not every intermediate "let me check..." narration step along
+  the way -- the agent loop's own multi-step tool-orchestration turns
+  are indistinguishable in shape from a genuine final answer, so without
+  this every one of them rendered as its own bubble. Verified against a
+  real conversation: 33 raw turns collapsed to the correct 14.
+- `supervisor_mcp.py`'s `message_bot`/`get_bot_status`/`delegate_task`
+  now check the target bot actually exists before doing anything, with a
+  suggested close-name match if it doesn't. Real bug found live:
+  messaging a name that isn't a real bot used to silently "succeed"
+  (the underlying session-creation path auto-creates a session under any
+  name and answers anyway, no actual bot behind it) instead of failing
+  -- a typo'd or hallucinated name looked exactly like a real reply.
+- `create_bot`'s tool result no longer reports a "provider" field -- a
+  known cosmetic staleness right after creation (the bot's actual
+  routing is correct regardless), not worth surfacing to the user as if
+  it were meaningful, reliable information.
 - `backend/resilience.py`: the chat-retry logic's failure checks
   (server-error rollover, corrupted-reply retry) are now independent,
   pluggable, individually unit-tested functions instead of inline

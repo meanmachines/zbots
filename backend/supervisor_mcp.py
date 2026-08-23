@@ -27,6 +27,7 @@ zorc-mcp's equivalent which sits behind a public Cloudflare Tunnel domain.
 """
 
 import asyncio
+import difflib
 import time
 
 import httpx
@@ -71,6 +72,49 @@ _STATUS_PROMPT = (
 )
 
 
+class BotNotFound(Exception):
+    """Raised by _require_bot when name isn't a real bot. Carries a
+    ready-to-relay message (with a suggestion, if one exists) so callers
+    don't have to build their own -- see its own docstring for why this
+    matters."""
+
+
+async def _require_bot(name: str) -> None:
+    """Real bug found live: messaging a name that isn't a real bot doesn't
+    fail -- POST /bots/{name}/messages silently creates a session under
+    that name and answers anyway, with no real bot behind it. A model
+    that skips list_bots() first gets a plausible-looking reply from a
+    phantom bot instead of a clear error, and the user never finds out
+    their actual bot never got the message.
+
+    Checks existence against the real roster first; if the name isn't
+    there, suggests the closest real name (plain string similarity --
+    difflib, no extra dependency) rather than just failing blind. Doesn't
+    attempt to match by description/task -- that's semantic matching,
+    better left to the calling model's own reasoning over list_bots()'s
+    output than hard-coded here.
+    """
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.get(f"{BOTS_UI_BASE}/roster")
+        r.raise_for_status()
+        roster = r.json()
+    names = [b["name"] for b in roster]
+    if name in names:
+        return
+    close = difflib.get_close_matches(name, names, n=1, cutoff=0.4)
+    if close:
+        raise BotNotFound(
+            f'No bot named "{name}" exists. Did you mean "{close[0]}"? '
+            f"Confirm with the user before messaging it, or call "
+            f"create_bot to make a real one named \"{name}\"."
+        )
+    raise BotNotFound(
+        f'No bot named "{name}" exists, and no similarly-named bot was '
+        f"found either. Tell the user, and offer to create_bot if they "
+        f"want one -- don't guess or invent a reply on their behalf."
+    )
+
+
 @mcp.tool()
 async def list_bots() -> list[dict]:
     """Every bot on this gateway: name, title, description, model, whether
@@ -102,7 +146,11 @@ async def get_bot_status(name: str) -> str:
     blurb instead of a real answer (confirmed live). This is a genuine
     conversation turn for the target bot, same as message_bot(), just with
     the status-check prompt already correct. Use message_bot() directly
-    when you want to ask something else or give an instruction instead."""
+    when you want to ask something else or give an instruction instead.
+
+    Raises if name isn't a real bot -- see message_bot's docstring for why
+    that matters here."""
+    await _require_bot(name)
     async with httpx.AsyncClient(timeout=300) as client:
         r = await client.post(f"{BOTS_UI_BASE}/bots/{name}/messages", json={"text": _STATUS_PROMPT})
         r.raise_for_status()
@@ -117,7 +165,17 @@ async def message_bot(name: str, message: str) -> str:
     its own conversation history, exactly like 'hermes peer dm' does. For a
     plain status check, use get_bot_status(name) instead -- it already
     asks the right way; a vague message here like 'what do you do' gets a
-    generic capabilities blurb, not a real answer."""
+    generic capabilities blurb, not a real answer.
+
+    Raises if name isn't a real bot, with a suggested close match if one
+    exists -- real bug found live: messaging a name that doesn't exist
+    used to silently succeed with a generic reply from no actual bot,
+    instead of failing. When relaying this bot's reply to the user, give
+    a brief summary of the key points, not the full text verbatim -- the
+    full detail is already sitting in that bot's own chat if they want to
+    open it; pasting the whole thing into this conversation too is
+    redundant and clutters it."""
+    await _require_bot(name)
     async with httpx.AsyncClient(timeout=300) as client:
         r = await client.post(f"{BOTS_UI_BASE}/bots/{name}/messages", json={"text": message})
         r.raise_for_status()
@@ -147,8 +205,12 @@ async def create_bot(name: str, title: str = "", description: str = "", persona_
     (never mention this platform's underlying engine or its internals) is
     appended automatically; you don't need to include it yourself.
 
-    Returns the new bot's roster entry: name, title, description, model,
-    provider.
+    Returns the new bot's roster entry: name, title, description, model.
+    Don't mention a "provider" to the user even if you see one elsewhere --
+    it's an internal routing label, not something meaningful to them, and
+    is sometimes wrong immediately after creation (a known cosmetic
+    staleness in the roster, not a real misconfiguration -- the bot still
+    uses the right model regardless of what this field briefly shows).
     """
     soul = persona.with_branding_safety(persona_text)
     async with httpx.AsyncClient(timeout=60) as client:
@@ -158,12 +220,13 @@ async def create_bot(name: str, title: str = "", description: str = "", persona_
         )
         r.raise_for_status()
         entry = r.json()
+    # provider deliberately omitted from the return value -- see the
+    # docstring above. Nothing the caller does with this result needs it.
     return {
         "name": entry.get("name"),
         "title": entry.get("title"),
         "description": entry.get("description"),
         "model": entry.get("model"),
-        "provider": entry.get("provider"),
     }
 
 
@@ -219,8 +282,15 @@ async def delegate_task(from_bot: str, to_bot: str, task: str) -> dict:
     finished (or even started) yet. The result arrives as a new incoming
     message in your own session once to_bot is done; you don't poll or
     ask again, it'll just be there the next time you're asked to
-    respond, prefixed "[delegated task <task_id> from <to_bot>]".
+    respond, prefixed "[delegated task <task_id> from <to_bot>]". When
+    that arrives, relay a brief summary of it to the user, not the full
+    text -- the full detail is already sitting in to_bot's own chat.
+
+    Raises if to_bot isn't a real bot, with a suggested close match if
+    one exists -- checked up front, before anything is dispatched, so a
+    typo'd name fails immediately instead of silently talking to nobody.
     """
+    await _require_bot(to_bot)
     task_id = f"task-{int(time.time() * 1000)}"
     _fire_and_forget(_run_delegated_task(task_id, from_bot, to_bot, task))
     return {"task_id": task_id, "status": "delegated", "to_bot": to_bot}
