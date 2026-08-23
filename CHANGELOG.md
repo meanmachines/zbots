@@ -7,6 +7,18 @@ tagged on `main`.
 ## [Unreleased]
 
 ### Fixed
+- `get_bot_messages()` merges every session in a bot's rollover family back
+  into one timeline (by design -- so a mid-conversation rollover doesn't
+  make earlier messages disappear), but never accounted for the fact that
+  a rollover resends the user's own message into the fresh session. Real
+  bug found live, reproduced with a real multi-tool-call turn: the user's
+  own prompt visibly appeared twice back-to-back in the chat (three times
+  for a double rollover) even though it was only typed once. Confirmed by
+  reading two rollover sessions' own rows directly: both started with the
+  literal same "user" text. Fixed with `_dedupe_rollover_replay()`,
+  collapsing a run of consecutive same-text user turns into one -- safe
+  unconditionally, since a genuine accidental double-send by the user
+  reads identically either way. Pinned with 3 new tests.
 - `stream_to_bot()`'s rollover forwarded every frame from attempt 1 live,
   including its own `assistant.completed` -- safe under the OLD frontend
   (only ever rendered `assistant.delta`), but broke the moment the

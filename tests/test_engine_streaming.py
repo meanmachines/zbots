@@ -205,3 +205,50 @@ def test_a_hard_error_with_no_completed_frame_still_suppresses_correctly(monkeyp
     attempt_2 = [(_frame("assistant.completed", {"content": "recovered"}), False)]
     out = _drain(monkeypatch, [attempt_1, attempt_2])
     assert out == [attempt_2[0][0]]
+
+
+# ---------------------------------------------------------------------------
+# get_bot_messages' rollover-replay dedup -- real bug found live: a rollover
+# resends the user's own message into the fresh session (by design, see
+# stream_to_bot's own comment), and the merge across a bot's whole session
+# family never accounted for that -- the user's prompt visibly appeared
+# twice (three times for a double rollover) back-to-back in the chat.
+# Confirmed live by reading two rollover sessions' own rows: both started
+# with the literal same "user" text.
+# ---------------------------------------------------------------------------
+
+def test_dedupes_the_replayed_user_message_across_a_rollover():
+    messages = [
+        {"role": "user", "content": "hi", "timestamp": 1},
+        {"role": "assistant", "content": "hello", "timestamp": 2},
+        {"role": "user", "content": "do the thing", "timestamp": 3},
+        # Rollover replay: same text, no reply in between, from a fresh session.
+        {"role": "user", "content": "do the thing", "timestamp": 4},
+        {"role": "assistant", "content": "done", "timestamp": 5},
+    ]
+    out = engine._dedupe_rollover_replay(messages)
+    assert [m["content"] for m in out] == ["hi", "hello", "do the thing", "done"]
+
+
+def test_dedupes_a_double_rollover_replayed_three_times():
+    messages = [
+        {"role": "user", "content": "do the thing", "timestamp": 1},
+        {"role": "user", "content": "do the thing", "timestamp": 2},
+        {"role": "user", "content": "do the thing", "timestamp": 3},
+        {"role": "assistant", "content": "done", "timestamp": 4},
+    ]
+    out = engine._dedupe_rollover_replay(messages)
+    assert len(out) == 2
+    assert out[0]["content"] == "do the thing"
+
+
+def test_does_not_dedupe_across_an_intervening_assistant_reply():
+    messages = [
+        {"role": "user", "content": "hi", "timestamp": 1},
+        {"role": "assistant", "content": "hello", "timestamp": 2},
+        # A real repeat, genuinely sent again after a reply -- not a
+        # rollover artifact, must stay as two distinct turns.
+        {"role": "user", "content": "hi", "timestamp": 3},
+    ]
+    out = engine._dedupe_rollover_replay(messages)
+    assert len(out) == 3

@@ -749,4 +749,43 @@ async def get_bot_messages(profile: str, api_server_key: str, limit: int = 200) 
         payload = body or {}
         all_messages.extend(payload.get("data") or payload.get("messages") or [])
     all_messages.sort(key=lambda m: m.get("timestamp") or 0)
-    return all_messages[-limit:]
+    return _dedupe_rollover_replay(all_messages)[-limit:]
+
+
+def _message_text(msg: dict) -> str:
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(c if isinstance(c, str) else (c or {}).get("text", "") for c in content)
+    return ""
+
+
+def _dedupe_rollover_replay(messages: list[dict]) -> list[dict]:
+    """Collapse the duplicate user turn a rollover leaves behind.
+
+    Real bug found live: stream_to_bot()/send_to_bot()'s rollover starts a
+    fresh session and resends the SAME user message into it (by design --
+    that's how the new session gets a first turn at all). get_bot_messages
+    merges every session in the family back into one timeline so a
+    rollover doesn't make earlier messages disappear, but it never
+    accounted for this specific replay -- the result is the user's own
+    prompt visibly appearing twice (or three times, for a turn that rolled
+    over twice) back-to-back in the chat, confirmed live by reading two
+    rollover sessions' own message rows: both start with the literal same
+    "user" text. A user genuinely sending the identical message twice in a
+    row (no reply in between either way) reads the same collapsed to one,
+    so this is safe to always apply, not just detect the rollover case
+    specifically.
+    """
+    out: list[dict] = []
+    for msg in messages:
+        if (
+            out
+            and msg.get("role") == "user"
+            and out[-1].get("role") == "user"
+            and _message_text(msg) == _message_text(out[-1])
+        ):
+            continue
+        out.append(msg)
+    return out
