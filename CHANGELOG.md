@@ -6,6 +6,32 @@ tagged on `main`.
 
 ## [Unreleased]
 
+### Added
+- A small, transient status line while a bot is using a tool (e.g.
+  "Messaging default...", "Creating routine...", "Thinking...") -- the
+  same idea as the desktop app's own tool-progress indicator. Real
+  hermes-agent streaming events (`tool.started`/`tool.progress`) were
+  already arriving over the wire; the frontend only ever handled
+  `assistant.delta` and silently dropped the rest. Real bug found live
+  building this: delta text narrating an upcoming tool call ("I'll use
+  the message_bot tool to...") streams BEFORE the tool.started event for
+  it, so a naive "only show status before any delta" guard never fired --
+  the narration bubble was already on screen. Fixed by discarding that
+  bubble the moment a real tool call starts (the same thing the
+  persona's response-style guardrail already asks the model not to write
+  in the first place -- this is the deterministic backstop for when it
+  does anyway) and showing the clean status line instead; a fresh bubble
+  opens once the real, final delta run begins. `bot-supervisor`'s own
+  tools and hermes' action-based tools (cronjob, memory) get specific,
+  friendly labels; the tool_search bridge (tool_search/tool_describe/
+  tool_call) resolves through to the real underlying tool where possible;
+  anything else falls back to a humanized version of its raw name rather
+  than being hidden, so a newly installed MCP server's tools show
+  something sensible with zero frontend changes needed. Verified live
+  with a real browser, not just by reading the code -- watched the label
+  progress through an actual multi-tool-call turn and confirmed it clears
+  correctly once the real answer starts.
+
 ### Fixed
 - A scheduled routine's own internal trigger text (e.g. "This is your
   scheduled 5-minute check-in trigger...") rendered as a real "user"

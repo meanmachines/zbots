@@ -545,6 +545,30 @@ input:focus, textarea:focus, select:focus {
   30% { transform: translateY(-4px); opacity: 1; }
 }
 
+/* Small, transient status line while a tool is running (e.g. "Creating
+   routine...") -- same idea as the desktop app's own tool-progress
+   indicator: it's not a chat message, so it never gets its own bubble,
+   just quiet subtext that clears the moment the real answer starts
+   streaming in. */
+#tool-status {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0 0.2rem 0.1rem;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+#tool-status::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  animation: typing-bounce 1.1s infinite ease-in-out;
+  flex-shrink: 0;
+}
+
 #composer-row {
   padding: 0.9rem 1.25rem;
   display: flex;

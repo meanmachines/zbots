@@ -765,6 +765,72 @@ function hideTypingIndicator() {
   document.getElementById("typing-indicator")?.remove();
 }
 
+// Friendly one-line labels for a live tool.started/tool.progress event --
+// what the desktop app's own equivalent indicator shows while a tool
+// runs ("Creating routine...", "Messaging default...") instead of either
+// showing nothing or a raw internal tool name. bot-supervisor's own
+// tools and hermes' own action-based "mega-tools" (cronjob, memory) get
+// specific, context-aware labels; anything else falls back to a
+// humanized version of its real name rather than being hidden outright,
+// so a newly installed MCP server's tools still show SOMETHING sensible
+// with zero changes needed here.
+function toolStatusLabel(toolName, preview, args) {
+  if (toolName === "_thinking") return "Thinking";
+  // tool_search's bridge tools (tool_describe/tool_call) are the deferred-
+  // listing mechanism itself, not something meaningful on their own --
+  // resolve to the REAL tool they're describing/calling when possible.
+  if (toolName === "tool_describe" || toolName === "tool_call") {
+    const real = (args && (args.name || (args.arguments && args.arguments.name))) || preview;
+    if (real) return toolStatusLabel(real.replace(/^mcp__.*?__/, ""), null, args && args.arguments);
+    return "Looking into it";
+  }
+  if (toolName === "tool_search") return "Looking into it";
+  const bare = toolName.replace(/^mcp__.*?__/, "");
+  const target = preview || (args && (args.name || args.target));
+  switch (bare) {
+    case "list_bots": return "Checking bots";
+    case "get_bot_status": return target ? `Checking on ${target}` : "Checking bot status";
+    case "message_bot": return target ? `Messaging ${target}` : "Messaging a bot";
+    case "delegate_task": return target ? `Delegating to ${target}` : "Delegating a task";
+    case "create_bot": return target ? `Creating bot "${target}"` : "Creating a bot";
+    case "cronjob": {
+      const action = (args && args.action) || "";
+      if (action === "create") return "Creating routine";
+      if (action === "list") return "Checking routines";
+      if (action === "update" || action === "edit") return "Updating routine";
+      if (action === "delete" || action === "remove") return "Removing routine";
+      if (action === "run" || action === "trigger") return "Running routine";
+      return "Managing routines";
+    }
+    case "memory": {
+      const action = (args && args.action) || "";
+      if (action === "save" || action === "add" || action === "write") return "Saving to memory";
+      if (action === "search" || action === "recall" || action === "get") return "Checking memory";
+      if (action === "delete" || action === "remove" || action === "forget") return "Updating memory";
+      return "Using memory";
+    }
+    default:
+      // Humanize an unmapped tool name -- "web_search" -> "Using web search".
+      return "Using " + bare.replace(/_/g, " ");
+  }
+}
+
+function showToolStatus(text) {
+  const pane = document.getElementById("messages-pane");
+  let el = document.getElementById("tool-status");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "tool-status";
+    pane.appendChild(el);
+  }
+  el.textContent = text + "...";
+  pane.scrollTop = pane.scrollHeight;
+}
+
+function hideToolStatus() {
+  document.getElementById("tool-status")?.remove();
+}
+
 function appendOptimisticUserMessage(text) {
   const pane = document.getElementById("messages-pane");
   const div = document.createElement("div");
@@ -850,15 +916,44 @@ async function streamBotReply(botName, text, isStillActive) {
       if (eventName === "assistant.delta" && payload.delta && isStillActive()) {
         if (!sawDelta) {
           hideTypingIndicator();
+          hideToolStatus();
           bubble = appendStreamingBotMessage();
           sawDelta = true;
         }
         bubble.textContent += payload.delta;
         const pane = document.getElementById("messages-pane");
         pane.scrollTop = pane.scrollHeight;
+      } else if (eventName === "tool.started" && isStillActive()) {
+        // Real bug found live: delta text narrating an upcoming tool call
+        // ("I'll use the message_bot tool to...") streams BEFORE
+        // tool.started, so a naive "only before any delta" guard here
+        // never fires -- the narration bubble was already created and
+        // sawDelta already true by the time the tool call itself starts.
+        // That narration was never the real answer, so discard it (same
+        // thing the persona's own response-style guardrail asks the
+        // model not to write in the first place -- this is the
+        // deterministic backstop for when it does anyway) and show the
+        // clean tool-status line instead; a fresh bubble opens for
+        // whatever delta run follows the tool call.
+        if (bubble) {
+          bubble.remove();
+          bubble = null;
+          sawDelta = false;
+        }
+        showToolStatus(toolStatusLabel(payload.tool_name, payload.preview, payload.args));
+      } else if (eventName === "tool.progress" && payload.tool_name === "_thinking" && isStillActive()) {
+        if (bubble) {
+          bubble.remove();
+          bubble = null;
+          sawDelta = false;
+        }
+        showToolStatus("Thinking");
+      } else if ((eventName === "run.completed" || eventName === "error") && isStillActive()) {
+        hideToolStatus();
       }
     }
   }
+  hideToolStatus();
 }
 
 function extractText(row) {
