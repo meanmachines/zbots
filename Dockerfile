@@ -35,8 +35,14 @@ COPY vendor/ /opt/zbots/vendor/
 # aiohttp.test_utils.make_mocked_request -- so it's a real, unconditional
 # runtime need here regardless of which extras group happens to list it.
 # Pinned to match what hermes-agent's own extras already vet.
+# mcp is the same story as aiohttp above: an optional extra
+# (hermes-agent's own "mcp" extra pins mcp==2.0.0), not a base dependency,
+# but supervisor_mcp.py imports it directly to run the bot-supervisor
+# tool server. Installed alone rather than the whole extra group -- its
+# own transitive deps (httpx2, sse-starlette, ...) come along
+# automatically and don't collide with what's already installed.
 RUN pip install --no-cache-dir -e /opt/zbots/vendor/hermes-agent \
-    && pip install --no-cache-dir fastapi uvicorn httpx python-multipart aiohttp==3.14.3
+    && pip install --no-cache-dir fastapi uvicorn httpx python-multipart aiohttp==3.14.3 mcp==2.0.0
 
 COPY backend/ /opt/zbots/backend/
 COPY frontend/ /opt/zbots/frontend/

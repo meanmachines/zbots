@@ -29,6 +29,12 @@ if [ ! -f "$HERMES_HOME/config.yaml" ]; then
     # provider configured" during testing was HERMES_HOME not being set on
     # an ad-hoc process restart, not this file. `name`/`model`/
     # `discover_models` mirror the shape a real working profile writes.
+    #
+    # title_generation disabled: engine.py's own session-family tracking
+    # (get_bot_messages, the rollover logic) recognizes a bot's sessions
+    # by a specific title pattern it sets at creation time. Auto-titling
+    # rewrites that title from the opening message's content, which is a
+    # real UX nicety on its own but works against tracking here.
     cat > "$HERMES_HOME/config.yaml" <<EOF
 model:
   provider: zbots
@@ -42,7 +48,27 @@ providers:
     api_key: ${ZBOTS_MODEL_API_KEY:-none}
     models:
       ${ZBOTS_MODEL_NAME}: {}
+mcp_servers:
+  bot-supervisor:
+    url: http://127.0.0.1:8645/mcp
+auxiliary:
+  title_generation:
+    enabled: false
 EOF
+fi
+
+# hermes-agent seeds its OWN default persona into a fresh profile's
+# SOUL.md -- literally "You are Hermes Agent, an intelligent AI assistant
+# created by Nous Research." Found live: the bootstrapped "default" bot
+# had never been given anything else, so every reply carried that exact
+# self-identification, directly contradicting zBots owning its public
+# identity. hermes-agent only auto-writes its own default when SOUL.md
+# is missing or still its legacy empty scaffold (_ensure_default_soul_md
+# in hermes_cli/config.py) -- writing real content here first means it's
+# recognized as user-customized and never touched again, on this or any
+# later boot.
+if [ ! -f "$HERMES_HOME/SOUL.md" ]; then
+    (cd /opt/zbots/backend && python3 -c "from persona import DEFAULT_SOUL; print(DEFAULT_SOUL)") > "$HERMES_HOME/SOUL.md"
 fi
 
 # Reuse the Hermes dashboard credential pair as the nginx basic-auth gate for
@@ -78,8 +104,16 @@ DASHBOARD_PID=$!
 (cd /opt/zbots/backend && exec python -m uvicorn main:app --host 127.0.0.1 --port "${BOTS_UI_PORT:-8643}") &
 BACKEND_PID=$!
 
-# Stop the other two if nginx exits so the container signals failure instead
+# bot-supervisor MCP tool server (backend/supervisor_mcp.py) -- gives a bot
+# the ability to list/message/check-status-on other bots on this same
+# gateway. Loopback-only, registered in the bootstrapped config.yaml above
+# so the engine actually connects to it; was present in the repo but never
+# started by anything, so it sat dormant until now.
+(cd /opt/zbots/backend && exec python -m uvicorn supervisor_mcp:app --host 127.0.0.1 --port 8645) &
+SUPERVISOR_PID=$!
+
+# Stop the others if nginx exits so the container signals failure instead
 # of hanging around with a half-dead process tree.
-trap 'kill "$BACKEND_PID" "$DASHBOARD_PID" 2>/dev/null || true' EXIT
+trap 'kill "$BACKEND_PID" "$DASHBOARD_PID" "$SUPERVISOR_PID" 2>/dev/null || true' EXIT
 
 nginx -g 'daemon off;'

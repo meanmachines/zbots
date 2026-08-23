@@ -4,6 +4,96 @@ All notable changes to zBots are recorded here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); versions are
 tagged on `main`.
 
+## [Unreleased]
+
+### Added
+- Frontend: a bot's chat now shows only each exchange's real final
+  answer, not every intermediate "let me check..." narration step along
+  the way -- the agent loop's own multi-step tool-orchestration turns
+  are indistinguishable in shape from a genuine final answer, so without
+  this every one of them rendered as its own bubble. Verified against a
+  real conversation: 33 raw turns collapsed to the correct 14.
+- `supervisor_mcp.py`'s `message_bot`/`get_bot_status`/`delegate_task`
+  now check the target bot actually exists before doing anything, with a
+  suggested close-name match if it doesn't. Real bug found live:
+  messaging a name that isn't a real bot used to silently "succeed"
+  (the underlying session-creation path auto-creates a session under any
+  name and answers anyway, no actual bot behind it) instead of failing
+  -- a typo'd or hallucinated name looked exactly like a real reply.
+- `create_bot`'s tool result no longer reports a "provider" field -- a
+  known cosmetic staleness right after creation (the bot's actual
+  routing is correct regardless), not worth surfacing to the user as if
+  it were meaningful, reliable information.
+- `backend/resilience.py`: the chat-retry logic's failure checks
+  (server-error rollover, corrupted-reply retry) are now independent,
+  pluggable, individually unit-tested functions instead of inline
+  conditionals in `engine.py`'s `send_to_bot()`.
+- `backend/supervisor_mcp.py` (the `bot-supervisor` MCP tool server) now
+  actually runs -- it existed in the repo but nothing started it. Wired
+  into `entrypoint.sh` as a third in-container process and registered in
+  the bootstrapped `config.yaml`'s `mcp_servers`.
+- `tests/test_resilience.py`: direct unit coverage for the resilience
+  checks, no mocking required.
+- `create_bot` MCP tool: the only correct way for a bot to create another
+  bot, wrapping the real `/bots` registry endpoint. Replaces a real
+  incident where a bot with no purpose-built tool for this fell back to
+  exploring the filesystem and running CLI commands, took ~10 minutes,
+  and left the new bot broken (no explicit model/provider).
+- `backend/persona.py`: a real zBots-branded default persona. Every bot
+  previously inherited the underlying engine's own stock identity
+  verbatim ("You are Hermes Agent, an intelligent AI assistant created
+  by Nous Research") -- found live, from the same incident above.
+- `delegate_task` MCP tool: fire-and-forget task handoff between bots --
+  a bot delegates work to another bot without blocking on it, and the
+  result arrives as a new message in its own session once the worker
+  finishes. See `docs/design/supervisor-delegation.md`.
+- Root nginx timeout for `/bots-api/` raised from nginx's 60s default to
+  300s -- a real, correctly-answered tool-use turn was hitting the
+  default and 504ing even though the backend kept working and produced
+  the right answer.
+
+### Fixed
+- The embedded chat engine cached a profile's resolved persona/model at
+  first use and never re-read it -- a soul/model/description edit made
+  through the dashboard API silently had no effect on chat until the
+  whole container restarted. `engine.invalidate_adapter()` now resets
+  that cache after any such edit, verified live to take effect on the
+  very next message.
+- MCP tool discovery was a silent casualty of the embedded engine
+  skipping `runner.start()` (needed to avoid ITS other side effects) --
+  a bot configured with an MCP server never actually connected to it.
+  Fixed by calling `discover_mcp_tools()` directly, the same standalone
+  function upstream's own startup calls.
+- The branding-safety persona instruction alone wasn't reliable -- a
+  direct "who made you" question still leaked "Hermes"/"Nous Research"
+  in 2 of 3 identical requests, even with the correct persona verified
+  in effect. `persona.redact_branding_leaks()` is now a deterministic
+  scrub applied to every reply, since a probabilistic model choosing to
+  disclose something it was told not to isn't fixable by rewording the
+  instruction alone.
+- Any bot other than "default" had a genuinely empty message history in
+  the UI regardless of how much it had actually chatted -- confirmed
+  live: a real, successful conversation with a second bot showed nothing
+  when viewing that bot directly. Root cause: `get_bot_messages()` was
+  wrapping its per-session message fetch in `_profile_scope`, which
+  causes the underlying engine's message-read handler to return zero
+  results for any non-default profile, even for a session it provably
+  owns (confirmed: the identical call, unscoped, returns the real
+  messages correctly). Session creation and listing were never affected
+  -- only reading a non-default bot's own messages back. Dropped the
+  scope for that one call; a session is already looked up by its own
+  globally unique id, so nothing about correctness depends on it.
+- `title_generation` disabled in the bootstrapped config -- the
+  engine's own auto-titling rewrites a session's title from its opening
+  message, which fights the title pattern zBots' session-family
+  tracking (rollover, `get_bot_messages`) depends on to recognize a
+  bot's own sessions.
+- `create_bot`: a bot asked to create another bot "named X" would
+  sometimes invent a different display title on its own initiative
+  (e.g. asked for "tt", titled it "Travel Planner") -- title now
+  defaults to the given name unless the caller explicitly passes a
+  different one.
+
 ## [0.1.0] - 2026-08-23
 
 First tagged release. zBots as a standalone product: its own container,

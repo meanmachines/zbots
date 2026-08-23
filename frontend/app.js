@@ -858,6 +858,32 @@ function extractText(row) {
   return row.text || "";
 }
 
+function collapseToFinalTurns(rows) {
+  // Between two user messages (or from the start of the thread to the
+  // end), the agent loop can take several assistant turns before its
+  // real answer -- narrating a plan, calling a tool, narrating the
+  // result, calling another tool, and so on. Each of those is a
+  // genuine, complete assistant turn, indistinguishable in shape from a
+  // real final answer, so without this every intermediate "let me
+  // check..." renders as its own bubble. Keep only the LAST non-empty
+  // assistant turn in each run -- that's always the one that actually
+  // answers the user; a pure tool-call trigger has empty content and is
+  // dropped outright, not just collapsed.
+  const collapsed = [];
+  let pendingAssistant = null;
+  for (const row of rows) {
+    if (row.role === "user") {
+      if (pendingAssistant) collapsed.push(pendingAssistant);
+      pendingAssistant = null;
+      collapsed.push(row);
+    } else if (row.role === "assistant") {
+      if (extractText(row).trim()) pendingAssistant = row;
+    }
+  }
+  if (pendingAssistant) collapsed.push(pendingAssistant);
+  return collapsed;
+}
+
 async function loadMessages(fromPoll = false) {
   if (!selected) return;
   // A background poll firing mid-send would rebuild the pane from
@@ -868,7 +894,7 @@ async function loadMessages(fromPoll = false) {
   try {
     if (selected.kind === "bot") {
       const rows = await apiGet(`/bots/${selected.id}/messages`);
-      const chatRows = (rows || []).filter((r) => r.role === "user" || r.role === "assistant");
+      const chatRows = collapseToFinalTurns((rows || []).filter((r) => r.role === "user" || r.role === "assistant"));
       renderMessages(chatRows, "bot");
     } else {
       const rows = await apiGet(`/groups/${selected.id}/messages`);
