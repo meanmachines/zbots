@@ -391,7 +391,22 @@ async def send_to_bot(
     reply = _reply_of(body)
 
     decision = resilience.evaluate(status=status, body=body, reply=reply)
-    if decision.mode is resilience.RetryMode.SAME_SESSION:
+    if decision.mode is resilience.RetryMode.ROLLOVER:
+        # Real bug found live: an existing session's model gets persisted
+        # (locked) after its first turn; switching the *global* active
+        # provider (Models page) doesn't touch that lock, so the next
+        # message on this session sends the OLD provider's stale model id
+        # to the NEW provider. A reachable-but-confused provider doesn't
+        # fail the HTTP call over this -- it answers 200 with its own
+        # rejection delivered as the reply text ("HTTP 400: <old-model> is
+        # not a valid model ID"), which is exactly what
+        # stale_model_lock_rolls_over is watching for. One retry, same as
+        # every other rollover here.
+        session_id, status, body = await _rollover_and_retry(session_id)
+        if status >= 400:
+            raise RuntimeError(f"chat retry failed: {status} {body}")
+        reply = _reply_of(body)
+    elif decision.mode is resilience.RetryMode.SAME_SESSION:
         status, body = await _chat(session_id)
         follow_up = resilience.evaluate(status=status, body=body, reply="")
         if follow_up.mode is resilience.RetryMode.ROLLOVER:
@@ -478,21 +493,35 @@ class _QueueStreamWriter:
         pass
 
 
-def _maybe_redact_sse_frame(raw: bytes, sse_frame_fn) -> bytes:
-    """Apply the same branding-safety scrub send_to_bot() applies to a full
-    reply, to one already-framed SSE chunk from the real streaming handler.
+def _process_sse_frame(raw: bytes, sse_frame_fn) -> tuple[bytes, bool]:
+    """Inspect one already-framed SSE chunk from the real streaming
+    handler; return (possibly-rewritten frame, is_rollover_worthy).
 
-    Only touches assistant.delta frames -- the only event type carrying
-    model-generated free text; run.started/tool.progress/done/keepalive
-    comments and everything else pass through byte-identical. Known, narrow
-    gap: a leaked phrase split exactly across two separate write() calls
-    escapes this (each frame is scrubbed in isolation) -- no worse than
-    doing nothing, since a blocking, non-streaming reply had no equivalent
-    boundary to split across; buffering the whole reply just to close that
-    gap would defeat the point of streaming it live.
+    Only touches/inspects assistant.delta frames -- the only event type
+    carrying model-generated free text; run.started/tool.progress/done/
+    keepalive comments and everything else pass through byte-identical,
+    never flagged. Two independent things happen in one parse pass since
+    both need the same decoded delta text:
+
+    1. Branding-safety redaction (same scrub send_to_bot() applies to a
+       full reply). Known, narrow gap: a leaked phrase split exactly
+       across two separate write() calls escapes this (each frame is
+       scrubbed in isolation) -- no worse than doing nothing, since a
+       blocking, non-streaming reply had no equivalent boundary to split
+       across; buffering the whole reply just to close that gap would
+       defeat the point of streaming it live.
+    2. resilience.stale_model_lock_rolls_over's same detection, applied
+       here because THIS failure mode never raises an event: error frame
+       -- the underlying provider call succeeds (200) with its own
+       rejection delivered as ordinary-looking delta text, so the
+       existing "was this frame literally event: error" rollover check
+       (see _run_stream_attempt) can't see it. Confirmed live: switching
+       the active provider mid-conversation left an existing session's
+       stale locked model id streaming straight through as if it were a
+       real reply.
     """
     if not raw.startswith(b"event:"):
-        return raw
+        return raw, False
     try:
         import json as _json
 
@@ -500,27 +529,30 @@ def _maybe_redact_sse_frame(raw: bytes, sse_frame_fn) -> bytes:
         header_line, _, rest = text.partition("\n")
         event_name = header_line.split(":", 1)[1].strip()
         if event_name != "assistant.delta":
-            return raw
+            return raw, False
         data_line = rest.strip()
         if not data_line.startswith("data:"):
-            return raw
+            return raw, False
         payload = _json.loads(data_line[len("data:") :].strip())
         delta = payload.get("delta")
         if not isinstance(delta, str) or not delta:
-            return raw
+            return raw, False
+        is_stale_lock = bool(resilience._STALE_MODEL_LOCK_RE.match(delta.strip()))
         payload["delta"] = persona.redact_branding_leaks(delta)
-        return sse_frame_fn(payload, event=event_name, ensure_ascii=False)
+        return sse_frame_fn(payload, event=event_name, ensure_ascii=False), is_stale_lock
     except Exception:
-        # Never let a redaction bug break the stream itself -- worst case
-        # is the same unredacted frame the caller already had.
-        return raw
+        # Never let this break the stream itself -- worst case is the
+        # same unredacted frame the caller already had, undetected.
+        return raw, False
 
 
 async def _run_stream_attempt(profile: str, session_id: str, message: str, headers: dict):
     """One real streaming attempt against session_id. Yields
     (sse_frame_bytes, was_error) pairs live as the real handler produces
-    them -- was_error is True exactly once, on the frame that reports the
-    handler's own `event: error` (if any); every other frame reports False.
+    them -- was_error is True on the handler's own `event: error` frame
+    (if any), or on an assistant.delta frame whose text is actually a
+    stale-model-lock rejection wearing a normal-looking delta (see
+    _process_sse_frame); every other frame reports False.
     """
     from aiohttp.base_protocol import BaseProtocol
     from aiohttp.streams import StreamReader
@@ -567,7 +599,8 @@ async def _run_stream_attempt(profile: str, session_id: str, message: str, heade
             chunk = await writer.queue.get()
             if chunk is None:
                 break
-            yield _maybe_redact_sse_frame(chunk, _sse_frame), chunk.startswith(b"event: error\n")
+            frame, is_stale_lock = _process_sse_frame(chunk, _sse_frame)
+            yield frame, is_stale_lock or chunk.startswith(b"event: error\n")
     finally:
         if not task.done():
             task.cancel()

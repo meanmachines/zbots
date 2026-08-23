@@ -6,7 +6,58 @@ tagged on `main`.
 
 ## [Unreleased]
 
+### Corrected
+- An earlier changelog entry claiming external MCP server tools (like
+  `bot-supervisor`'s) bypass hermes-agent's `tool_search` deferred-listing
+  cap was wrong. Re-verified live: `tools/tool_search.py`'s own module
+  docstring says MCP tools are exactly what it's for, and a direct check
+  against the real registry confirmed every one of `bot-supervisor`'s
+  tools is correctly classified deferrable and the catalog listing is
+  active and bounded (`listing_form: full`, capped at
+  `listing_max_tokens`). The earlier docstring-trimming work wasn't
+  wrong to do, but it wasn't fixing the token-cost driver it was credited
+  with -- a real turn's ~15,700-input-token floor persists even now, on a
+  genuinely fresh session, with zero conversation history. Where that
+  floor actually comes from is still an open question, not this.
+
 ### Fixed
+- `POST /api/model/set` (already wired as zBots' own `/models/activate`)
+  is hermes-agent's real, native way to point the main model at ANY
+  provider it understands -- including a first-class OpenRouter
+  integration (`provider: openrouter` + `OPENROUTER_API_KEY`), not just
+  the ones with a `providers.<id>` custom-endpoint entry. Using that
+  directly instead of wrapping OpenRouter in a fake custom endpoint is
+  also what surfaced the collision-guard gap above (`openrouter` isn't in
+  `PROVIDER_REGISTRY`/`ALIASES` -- it's a separate, hardcoded exclusion
+  set in `agent/agent_init.py`) and the stale-model-lock bug below.
+- `POST /providers`'s built-in-name collision guard now also rejects
+  `openrouter`/`custom`/`auto` -- routing-mode names hardcoded as a
+  special exclusion set in `agent/agent_init.py`, not present in
+  `PROVIDER_REGISTRY`/`ALIASES` so the original guard missed them. Real
+  bug found live: a custom endpoint saved as `openrouter` hit that
+  exclusion, so the missing-credentials fail-fast path never fired --
+  every message on it 500'd with a raw traceback instead of a clear
+  error.
+- A new resilience check, `stale_model_lock_rolls_over`: switching the
+  *global* active provider (Models page) doesn't clear an existing
+  session's own locked model id (this is documented, intentional
+  upstream behavior -- `/api/model/set` only affects new sessions), so
+  that session's next message sends the OLD provider's stale model
+  string to the NEW provider. When the new provider is merely confused
+  by it rather than unreachable, it answers 200 with its own rejection
+  delivered AS the reply text ("HTTP 400: nvidia/Qwen...-NVFP4 is not a
+  valid model ID") instead of a real HTTP failure -- confirmed live
+  switching to OpenRouter with an existing zbots-provider session, and
+  status-code-only checks like `server_error_rolls_over` can't see it.
+  Also fixed a real gap this exposed in `send_to_bot()` itself: it only
+  ever acted on a `SAME_SESSION` decision from its reply-aware
+  `resilience.evaluate()` call, never `ROLLOVER` -- so even with the new
+  check registered, the stale-lock reply would have reached the user
+  unhandled. The streaming path gets the identical detection (a
+  stale-lock rejection never raises `event: error`, it arrives as an
+  ordinary-looking `assistant.delta`, so the frame-shape check alone
+  couldn't catch it either) via the same regex, applied during the
+  per-frame redaction pass since both need the same decoded delta text.
 - The entire mobile responsive stylesheet (the `@media (max-width: 860px)`
   block) sat too early in `styles.css`, before ~600 lines of unconditional
   desktop rules -- with equal specificity, CSS resolves a tie by source

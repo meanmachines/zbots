@@ -69,8 +69,47 @@ def test_evaluate_returns_none_when_nothing_matches():
     assert decision.mode is r.RetryMode.NONE
 
 
-def test_registry_is_exactly_the_two_documented_checks():
+def test_registry_is_exactly_the_three_documented_checks():
     # Guards against a check being added/removed silently -- this list is
     # the actual plugin registry, so its contents are part of the contract.
     names = [check.name for check in r.RESILIENCE_CHECKS]
-    assert names == ["server_error_rollover", "corrupted_reply_retry"]
+    assert names == ["server_error_rollover", "stale_model_lock_rollover", "corrupted_reply_retry"]
+
+
+# ---------------------------------------------------------------------------
+# stale_model_lock_rolls_over -- real bug found live: switching the global
+# active provider (Models page) doesn't clear an existing session's own
+# locked model id, so its next message sends the OLD provider's stale model
+# string to the NEW provider. A reachable-but-confused provider answers 200
+# with its own rejection delivered AS the reply text instead of a real HTTP
+# failure, so this has to key off reply shape, not status.
+# ---------------------------------------------------------------------------
+
+def test_stale_model_lock_reply_asks_for_rollover():
+    reply = "HTTP 400: nvidia/Qwen3.6-35B-A3B-NVFP4 is not a valid model ID"
+    decision = r.stale_model_lock_rolls_over(status=200, body={}, reply=reply)
+    assert decision.mode is r.RetryMode.ROLLOVER
+
+
+def test_a_real_reply_that_merely_mentions_http_is_not_flagged():
+    # The anchor is deliberately strict (reply must START with "HTTP <code>:
+    # ... not a valid model") -- a real answer that happens to discuss HTTP
+    # status codes mid-sentence must not be mistaken for this failure.
+    reply = "By the way, HTTP 400 means the request was malformed."
+    decision = r.stale_model_lock_rolls_over(status=200, body={}, reply=reply)
+    assert decision.mode is r.RetryMode.NONE
+
+
+def test_stale_model_lock_check_is_skipped_on_error_status():
+    # Mirrors corrupted_reply's own guard -- a >=400 status means
+    # server_error_rolls_over already owns that case.
+    reply = "HTTP 400: some-model is not a valid model ID"
+    decision = r.stale_model_lock_rolls_over(status=500, body=None, reply=reply)
+    assert decision.mode is r.RetryMode.NONE
+
+
+def test_evaluate_catches_stale_model_lock_before_corruption_check():
+    reply = "HTTP 400: old-provider/some-model is not a valid model ID"
+    decision = r.evaluate(status=200, body={}, reply=reply)
+    assert decision.mode is r.RetryMode.ROLLOVER
+    assert decision.reason == "stale model lock"

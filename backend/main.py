@@ -273,7 +273,20 @@ def _reserved_provider_ids() -> frozenset[str]:
     from hermes_cli.auth import PROVIDER_REGISTRY
     from hermes_cli.providers import ALIASES
 
-    return frozenset(PROVIDER_REGISTRY.keys()) | frozenset(ALIASES.keys())
+    # These three are NOT in PROVIDER_REGISTRY/ALIASES -- they're routing
+    # *modes*, not vendor entries, so they were never added there -- but
+    # agent/agent_init.py hardcodes them as a special-cased exclusion set
+    # (`_explicit not in {"auto", "openrouter", "custom"}`) that skips the
+    # normal "missing API key" fail-fast error entirely. Real bug found
+    # live: a custom endpoint saved as "openrouter" hit this exact
+    # exclusion -- resolve_provider_client() has its own native OpenRouter
+    # path (checks OPENROUTER_API_KEY, ignores the custom entry's key_env
+    # entirely) that silently returned nothing, and with the fail-fast
+    # branch skipped, the request just fell through to the generic "No LLM
+    # provider configured" 500 instead of a clear error either way.
+    _hardcoded_reserved = frozenset({"auto", "openrouter", "custom"})
+
+    return frozenset(PROVIDER_REGISTRY.keys()) | frozenset(ALIASES.keys()) | _hardcoded_reserved
 
 
 def _custom_endpoint_id(raw: str) -> str:

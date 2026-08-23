@@ -73,6 +73,28 @@ def server_error_rolls_over(*, status: int, body: Optional[dict], reply: str) ->
     return RetryDecision(RetryMode.NONE)
 
 
+_STALE_MODEL_LOCK_RE = re.compile(r"^HTTP \d{3}: .*not a valid model")
+
+
+def stale_model_lock_rolls_over(*, status: int, body: Optional[dict], reply: str) -> RetryDecision:
+    """A variant of server_error_rolls_over's own bug, not a new one: a
+    session created under one provider persists its model id, and after
+    the *global* active provider is switched (Models page, /api/model/set)
+    that stale id gets sent to the NEW provider on this session's next
+    turn. When the new provider is unreachable/misconfigured that surfaces
+    as a >=500 (server_error_rolls_over already catches it); when the
+    provider is reachable but simply doesn't recognize the stale model id,
+    it instead answers 200 with its own rejection ("HTTP 400: <old-model>
+    is not a valid model ID") delivered AS the reply text -- confirmed
+    live switching to OpenRouter with an existing zbots-provider session.
+    status alone can't distinguish this from a real reply, so the check is
+    on shape: a real assistant reply doesn't start with "HTTP <code>:".
+    """
+    if status < 400 and _STALE_MODEL_LOCK_RE.match((reply or "").strip()):
+        return RetryDecision(RetryMode.ROLLOVER, "stale model lock")
+    return RetryDecision(RetryMode.NONE)
+
+
 _STREAM_CORRUPTION_RE = re.compile(r"(<unused\d+>\s*){3,}")
 
 
@@ -94,6 +116,7 @@ def corrupted_reply_retries_same_session(
 
 RESILIENCE_CHECKS: list[ResilienceCheck] = [
     FunctionCheck("server_error_rollover", server_error_rolls_over),
+    FunctionCheck("stale_model_lock_rollover", stale_model_lock_rolls_over),
     FunctionCheck("corrupted_reply_retry", corrupted_reply_retries_same_session),
 ]
 
