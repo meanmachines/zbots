@@ -231,6 +231,103 @@ async def delegate_task(from_bot: str, to_bot: str, task: str) -> dict:
     return {"task_id": task_id, "status": "delegated", "to_bot": to_bot}
 
 
+# ---------------------------------------------------------------------------
+# Routine (cron) management -- real bug found live: hermes-agent's own
+# native "cronjob" tool IS in the api_server platform's default toolset
+# (config), but never actually reaches an agent running through zBots'
+# embedded engine -- confirmed by tracing the real tool_defs list a chat
+# turn receives (cronjob absent, other same-toolset tools like memory
+# present). Root cause: the cronjob tool needs a scheduler reachable in
+# its OWN process, and the embedded chat engine (main:app) is a separate
+# process from the one that actually owns it (hermes gateway run) -- the
+# same process split the Connectors work surfaced. Rather than chase that
+# gate, these wrap zBots' own already-real, already-working /cron proxy
+# (same routes the Routines page itself uses) the same way every other
+# tool here wraps a real zBots endpoint -- not a new mechanism, the same
+# one message_bot/create_bot already use.
+# ---------------------------------------------------------------------------
+
+async def _resolve_routine_id(ref: str) -> str:
+    """A routine is more naturally referred to by name ("bobby-checkin")
+    than its opaque id -- accept either, resolving a name to its real id
+    the same way _require_bot resolves a bot name, with a close-match
+    suggestion instead of a silent no-op on a typo."""
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.get(f"{BOTS_UI_BASE}/cron")
+        r.raise_for_status()
+        jobs = r.json()
+    for job in jobs:
+        if job.get("id") == ref:
+            return ref
+    for job in jobs:
+        if job.get("name") == ref:
+            return job["id"]
+    names = [j.get("name") or j.get("id") for j in jobs]
+    close = difflib.get_close_matches(ref, names, n=1, cutoff=0.4)
+    if close:
+        raise BotNotFound(f'No routine named "{ref}" exists. Did you mean "{close[0]}"?')
+    raise BotNotFound(f'No routine named "{ref}" exists.')
+
+
+@mcp.tool()
+async def list_routines() -> list[dict]:
+    """Every scheduled routine (cron job) on this gateway: id, name,
+    schedule, enabled/paused state, and when it last ran. Free -- no LLM
+    call."""
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.get(f"{BOTS_UI_BASE}/cron")
+        r.raise_for_status()
+        jobs = r.json()
+    return [
+        {
+            "id": j.get("id"),
+            "name": j.get("name"),
+            "schedule": j.get("schedule_display") or j.get("schedule"),
+            "state": j.get("state"),
+            "enabled": j.get("enabled"),
+            "last_run_at": j.get("last_run_at"),
+            "last_status": j.get("last_status"),
+        }
+        for j in jobs
+    ]
+
+
+@mcp.tool()
+async def pause_routine(name_or_id: str) -> dict:
+    """Pause a scheduled routine by name or id -- it stays configured,
+    just stops firing until resumed. Raises if it doesn't exist, with a
+    close-match suggestion if one exists."""
+    job_id = await _resolve_routine_id(name_or_id)
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.post(f"{BOTS_UI_BASE}/cron/{job_id}/pause")
+        r.raise_for_status()
+        return r.json()
+
+
+@mcp.tool()
+async def resume_routine(name_or_id: str) -> dict:
+    """Resume a paused routine by name or id. Raises if it doesn't
+    exist, with a close-match suggestion if one exists."""
+    job_id = await _resolve_routine_id(name_or_id)
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.post(f"{BOTS_UI_BASE}/cron/{job_id}/resume")
+        r.raise_for_status()
+        return r.json()
+
+
+@mcp.tool()
+async def delete_routine(name_or_id: str) -> dict:
+    """Permanently delete a scheduled routine by name or id -- not
+    reversible (pause_routine if you just want it to stop firing
+    temporarily). Raises if it doesn't exist, with a close-match
+    suggestion if one exists."""
+    job_id = await _resolve_routine_id(name_or_id)
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.delete(f"{BOTS_UI_BASE}/cron/{job_id}")
+        r.raise_for_status()
+        return {"ok": True, "deleted": job_id}
+
+
 def build_app():
     security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,

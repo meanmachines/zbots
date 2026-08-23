@@ -7,6 +7,28 @@ tagged on `main`.
 ## [Unreleased]
 
 ### Added
+- Four new `bot-supervisor` MCP tools -- `list_routines`, `pause_routine`,
+  `resume_routine`, `delete_routine` -- so a bot can manage scheduled
+  routines (cron jobs) directly in conversation, not just through the
+  Routines admin page. Real bug found live: hermes-agent's own native
+  `cronjob` tool IS declared in the api_server platform's default toolset
+  (confirmed in `toolsets.py`), but never actually reaches an agent
+  running through zBots' embedded engine -- traced the real tool_defs
+  list a live chat turn receives and confirmed `cronjob` is absent while
+  other same-toolset tools (`memory`) are present. Root cause: the
+  cronjob tool needs a scheduler reachable in its own process, and the
+  embedded chat engine (`main:app`) is a separate process from the one
+  that actually owns it (`hermes gateway run`) -- the same process split
+  Connectors work surfaced earlier. Rather than chase that gate, these
+  wrap zBots' own already-real `/cron` proxy (the same routes the
+  Routines page itself uses) the same way every other bot-supervisor tool
+  wraps a real zBots endpoint -- message_bot/create_bot were never
+  reimplementing anything either. Accepts a routine by name (e.g.
+  "bobby-checkin") or id, with a close-match suggestion on a typo, same
+  pattern as `_require_bot`. Verified live end-to-end through real
+  conversation, not just by reading the code -- paused bobby-checkin via
+  chat, confirmed the real job state actually changed, resumed it the
+  same way.
 - A small, transient status line while a bot is using a tool (e.g.
   "Messaging default...", "Creating routine...", "Thinking...") -- the
   same idea as the desktop app's own tool-progress indicator. Real
