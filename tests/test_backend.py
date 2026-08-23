@@ -268,6 +268,14 @@ def _create_group(client):
 # ---------------------------------------------------------------------------
 
 def test_reserved_provider_ids_includes_known_builtins_and_aliases():
+    # The real, vendored hermes_cli package -- not mocked -- since the
+    # whole point of this function is to stay in sync with hermes-agent's
+    # own registry rather than duplicating it. Everything else in this
+    # section mocks it (see that test/CI's own note above): CI's sparse
+    # checkout deliberately never fetches vendor/hermes-agent, so a real
+    # import here only works where the checkout is full (local dev, and
+    # any live-container check) -- skip cleanly where it isn't.
+    pytest.importorskip("hermes_cli", reason="only present in a full checkout, not CI's sparse one")
     reserved = m._reserved_provider_ids()
     assert "deepseek" in reserved  # PROVIDER_REGISTRY entry
     assert "qwen" in reserved  # ALIASES entry (-> alibaba)
@@ -283,6 +291,7 @@ def test_save_provider_rejects_a_name_that_collides_with_a_builtin(client, monke
         raise AssertionError("dash_send must not be called once the name collides")
 
     monkeypatch.setattr(m, "dash_send", fake_dash_send)
+    monkeypatch.setattr(m, "_reserved_provider_ids", lambda: frozenset({"deepseek", "qwen"}))
 
     resp = client.post(
         "/providers",
@@ -298,6 +307,7 @@ def test_save_provider_accepts_a_non_colliding_name_and_invalidates_the_adapter(
 
     invalidated = []
     monkeypatch.setattr(m, "dash_send", fake_dash_send)
+    monkeypatch.setattr(m, "_reserved_provider_ids", lambda: frozenset({"deepseek", "qwen"}))
     monkeypatch.setattr(m._engine, "invalidate_adapter", lambda: invalidated.append(True))
 
     resp = client.post(
