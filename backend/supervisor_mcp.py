@@ -24,6 +24,17 @@ main.py in-process, since these are two separate processes now.
 Loopback-only (Hermes' own gateway process calls this from inside the same
 container), so no bearer auth/public hostname allowlist needed, unlike
 zorc-mcp's equivalent which sits behind a public Cloudflare Tunnel domain.
+
+A note on why every docstring below is short: unlike hermes-agent's own
+built-in tools, which go through a capped, deferred tool_search catalog
+(config.yaml's tools.tool_search.listing_max_tokens -- see
+config_defaults.py), an external MCP server's tool descriptions get sent
+to the model in full on every turn, uncapped. Confirmed live: a trivial
+"what is 15 plus 27" cost 31,337 input tokens with these tools attached,
+identical whether or not the bot's own bundled skills were loaded (i.e.
+skills weren't the cost -- these tool descriptions almost certainly are).
+The reasoning and incident history that used to live in these docstrings
+now lives in comments instead, which cost nothing at runtime.
 """
 
 import asyncio
@@ -46,32 +57,11 @@ mcp = MCPServer(
     name="bot-supervisor",
     version="1.0.0",
     instructions=(
-        "The user's OWN bots on this gateway can talk to each other -- if "
-        "asked to ask/tell/message/check with a name you don't already "
-        "know, ALWAYS call list_bots() first to see whether it's one of "
-        "your own bots before assuming it's an external contact you have "
-        "no way to reach. Guessing wrong here means telling the user you "
-        "can't do something you actually can. Tools for supervising other "
-        "bots on this same gateway, including creating new ones. "
-        "Workflow: list_bots() first to see who exists "
-        "(free, no LLM call) -> get_bot_status(name) for a real 'what are "
-        "you actually doing right now' answer from that bot -> "
-        "message_bot(name, message) for a quick question you're willing "
-        "to wait a few seconds for, or delegate_task(from_bot, to_bot, "
-        "task) for real work, so you stay responsive to the user instead "
-        "of blocking. Need a bot that doesn't exist yet? Use create_bot "
-        "-- never try to create one by exploring the filesystem or "
-        "running CLI commands; that bypasses the real bot registry, "
-        "leaves it broken, and takes far longer than this one call. "
-        "get_bot_status(), message_bot(), and delegate_task() are all "
-        "real conversation turns for the target bot (their reply becomes "
-        "part of its own history), so use them deliberately, not as a "
-        "cheap poll -- list_bots()'s last_message_preview/is_active "
-        "fields are the free option when a rough sense of activity is "
-        "enough. If any of these tools raises an error, explain what "
-        "happened to the user in one plain sentence and what to do next "
-        "-- never paste the raw error/exception text into the chat; that "
-        "reads as a broken app, not a bot that hit a snag and handled it."
+        "Bots on this gateway can talk to each other. If asked to ask/"
+        "tell/message a name you don't recognize, call list_bots() "
+        "first before assuming it's an external contact you can't "
+        "reach. On a tool error, explain it to the user in one plain "
+        "sentence -- never paste the raw error text."
     ),
 )
 
@@ -82,27 +72,19 @@ _STATUS_PROMPT = (
 
 
 class BotNotFound(Exception):
-    """Raised by _require_bot when name isn't a real bot. Carries a
-    ready-to-relay message (with a suggestion, if one exists) so callers
-    don't have to build their own -- see its own docstring for why this
-    matters."""
+    """Raised by _require_bot when name isn't a real bot."""
 
 
+# Real bug found live: messaging a name that isn't a real bot didn't fail --
+# POST /bots/{name}/messages silently created a session under that name and
+# answered anyway, no actual bot behind it. A model that skipped list_bots()
+# first got a plausible-looking reply from a phantom bot instead of a clear
+# error, and the user never found out their actual bot never got the
+# message. This checks the real roster first and suggests the closest name
+# (difflib, no extra dependency) rather than failing blind. Doesn't attempt
+# to match by description/task -- that's semantic matching, better left to
+# the calling model's own reasoning over list_bots()'s output.
 async def _require_bot(name: str) -> None:
-    """Real bug found live: messaging a name that isn't a real bot doesn't
-    fail -- POST /bots/{name}/messages silently creates a session under
-    that name and answers anyway, with no real bot behind it. A model
-    that skips list_bots() first gets a plausible-looking reply from a
-    phantom bot instead of a clear error, and the user never finds out
-    their actual bot never got the message.
-
-    Checks existence against the real roster first; if the name isn't
-    there, suggests the closest real name (plain string similarity --
-    difflib, no extra dependency) rather than just failing blind. Doesn't
-    attempt to match by description/task -- that's semantic matching,
-    better left to the calling model's own reasoning over list_bots()'s
-    output than hard-coded here.
-    """
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.get(f"{BOTS_UI_BASE}/roster")
         r.raise_for_status()
@@ -112,24 +94,14 @@ async def _require_bot(name: str) -> None:
         return
     close = difflib.get_close_matches(name, names, n=1, cutoff=0.4)
     if close:
-        raise BotNotFound(
-            f'No bot named "{name}" exists. Did you mean "{close[0]}"? '
-            f"Confirm with the user before messaging it, or call "
-            f"create_bot to make a real one named \"{name}\"."
-        )
-    raise BotNotFound(
-        f'No bot named "{name}" exists, and no similarly-named bot was '
-        f"found either. Tell the user, and offer to create_bot if they "
-        f"want one -- don't guess or invent a reply on their behalf."
-    )
+        raise BotNotFound(f'No bot named "{name}" exists. Did you mean "{close[0]}"?')
+    raise BotNotFound(f'No bot named "{name}" exists.')
 
 
 @mcp.tool()
 async def list_bots() -> list[dict]:
-    """Every bot on this gateway: name, title, description, model, whether
-    it's currently active, and a preview of its last message. Call this
-    first to see who you can message -- it costs nothing (no LLM call),
-    unlike message_bot()."""
+    """Every bot on this gateway: name, title, description, model,
+    is_active, last_message_preview. Free -- no LLM call."""
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.get(f"{BOTS_UI_BASE}/roster")
         r.raise_for_status()
@@ -149,16 +121,10 @@ async def list_bots() -> list[dict]:
 
 @mcp.tool()
 async def get_bot_status(name: str) -> str:
-    """Ask a bot for its real current status and last completed task, using
-    a pre-engineered prompt so you don't need to phrase it yourself -- a
-    vague ask like 'what do you do' reliably gets a generic capabilities
-    blurb instead of a real answer (confirmed live). This is a genuine
-    conversation turn for the target bot, same as message_bot(), just with
-    the status-check prompt already correct. Use message_bot() directly
-    when you want to ask something else or give an instruction instead.
-
-    Raises if name isn't a real bot -- see message_bot's docstring for why
-    that matters here."""
+    """Ask a bot for its real current status. Costs a real turn for
+    that bot. Raises if name isn't a real bot."""
+    # Pre-engineered prompt: a vague "what do you do" reliably gets a
+    # generic capabilities blurb instead of a real answer (confirmed live).
     await _require_bot(name)
     async with httpx.AsyncClient(timeout=300) as client:
         r = await client.post(f"{BOTS_UI_BASE}/bots/{name}/messages", json={"text": _STATUS_PROMPT})
@@ -168,22 +134,11 @@ async def get_bot_status(name: str) -> str:
 
 @mcp.tool()
 async def message_bot(name: str, message: str) -> str:
-    """Send a message to another bot's own canonical session and return its
-    real reply. This is a genuine conversation turn for that bot -- it sees
-    the message as if a user/peer sent it, and its reply becomes part of
-    its own conversation history, exactly like 'hermes peer dm' does. For a
-    plain status check, use get_bot_status(name) instead -- it already
-    asks the right way; a vague message here like 'what do you do' gets a
-    generic capabilities blurb, not a real answer.
-
-    Raises if name isn't a real bot, with a suggested close match if one
-    exists -- real bug found live: messaging a name that doesn't exist
-    used to silently succeed with a generic reply from no actual bot,
-    instead of failing. When relaying this bot's reply to the user, give
-    a brief summary of the key points, not the full text verbatim -- the
-    full detail is already sitting in that bot's own chat if they want to
-    open it; pasting the whole thing into this conversation too is
-    redundant and clutters it."""
+    """Send a message to another bot and return its real reply -- a
+    genuine turn for that bot, blocking until it answers. Raises if
+    name isn't a real bot, with a close-match suggestion if one exists.
+    When relaying the reply, summarize the key points -- the full text
+    is already in that bot's own chat if the user wants to open it."""
     await _require_bot(name)
     async with httpx.AsyncClient(timeout=300) as client:
         r = await client.post(f"{BOTS_UI_BASE}/bots/{name}/messages", json={"text": message})
@@ -193,34 +148,18 @@ async def message_bot(name: str, message: str) -> str:
 
 @mcp.tool()
 async def create_bot(name: str, title: str = "", description: str = "", persona_text: str = "") -> dict:
-    """Create a new bot on this gateway. This is the ONLY correct way to
-    do it -- it calls the real bot registry (POST /bots), which forces an
-    explicit model/provider at creation time to avoid a real bug where a
-    bot left to inherit one gets silently coerced onto a broken provider.
-    Trying to create a bot any other way (writing files, running CLI
-    commands to make a new profile, etc.) bypasses that safeguard, leaves
-    the bot broken, and is far slower than this one call.
-
-    title is the display name shown in the roster -- leave it blank to
-    use `name` as-is. Only pass a different title if the user actually
-    asked for one; don't invent a nicer-sounding display name on your
-    own initiative when the user gave you an exact name to use (found
-    live: asked to create a bot "named tt", a model passed name="tt" but
-    title="Travel Planner" -- correct internally, but not what was
-    asked, and confusing since the roster shows the title, not the name).
-
-    persona_text is optional -- what this bot should act like (e.g. "a
-    research specialist who cites sources"). A branding-safety guardrail
-    (never mention this platform's underlying engine or its internals) is
-    appended automatically; you don't need to include it yourself.
-
-    Returns the new bot's roster entry: name, title, description, model.
-    Don't mention a "provider" to the user even if you see one elsewhere --
-    it's an internal routing label, not something meaningful to them, and
-    is sometimes wrong immediately after creation (a known cosmetic
-    staleness in the roster, not a real misconfiguration -- the bot still
-    uses the right model regardless of what this field briefly shows).
-    """
+    """Create a new bot -- the only correct way to do it (never
+    improvise one via filesystem/CLI access). title defaults to name;
+    only pass a different one if the user actually asked for one.
+    persona_text is optional (what this bot should act like); a
+    branding-safety guardrail is appended automatically. Returns name,
+    title, description, model."""
+    # Calls the real registry (POST /bots), which forces an explicit
+    # model/provider at creation so a bot never inherits a broken one.
+    # Real bug found live: a bot asked to create one named "tt" invented
+    # the display title "Travel Planner" on its own -- title now
+    # defaults to name specifically to stop that kind of over-eager
+    # renaming.
     soul = persona.with_branding_safety(persona_text)
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(
@@ -229,8 +168,9 @@ async def create_bot(name: str, title: str = "", description: str = "", persona_
         )
         r.raise_for_status()
         entry = r.json()
-    # provider deliberately omitted from the return value -- see the
-    # docstring above. Nothing the caller does with this result needs it.
+    # "provider" deliberately omitted -- a known cosmetic staleness right
+    # after creation (real routing is correct regardless), not worth
+    # spending tokens on or surfacing to the user as meaningful.
     return {
         "name": entry.get("name"),
         "title": entry.get("title"),
@@ -239,11 +179,11 @@ async def create_bot(name: str, title: str = "", description: str = "", persona_
     }
 
 
-# Real design/build tracked in docs/design/supervisor-delegation.md.
 # asyncio.create_task()'s own docs warn that a task with no strong
-# reference held elsewhere can be garbage-collected mid-flight -- this
-# set is that reference, with a done-callback to stop holding it once it
-# finishes (success or failure) so the set doesn't grow forever.
+# reference held elsewhere can be garbage-collected mid-flight -- this set
+# is that reference, with a done-callback to stop holding it once it
+# finishes (success or failure) so the set doesn't grow forever. Full
+# design in docs/design/supervisor-delegation.md.
 _background_tasks: set = set()
 
 
@@ -277,28 +217,14 @@ async def _run_delegated_task(task_id: str, from_bot: str, to_bot: str, task: st
 
 @mcp.tool()
 async def delegate_task(from_bot: str, to_bot: str, task: str) -> dict:
-    """Hand a task off to another bot WITHOUT waiting for it to finish --
-    use this instead of message_bot() for anything that sounds like real
-    work (multi-step research, code changes, long analysis), so you stay
-    responsive to the user instead of blocking for however long to_bot
-    takes. message_bot() is still correct for a quick question you're
-    fine waiting a few seconds for.
-
-    from_bot is YOUR OWN bot name. There's no other way for this tool to
-    know which session to deliver the result back to, so always pass it.
-
-    Returns immediately with a task_id -- to_bot hasn't necessarily
-    finished (or even started) yet. The result arrives as a new incoming
-    message in your own session once to_bot is done; you don't poll or
-    ask again, it'll just be there the next time you're asked to
-    respond, prefixed "[delegated task <task_id> from <to_bot>]". When
-    that arrives, relay a brief summary of it to the user, not the full
-    text -- the full detail is already sitting in to_bot's own chat.
-
-    Raises if to_bot isn't a real bot, with a suggested close match if
-    one exists -- checked up front, before anything is dispatched, so a
-    typo'd name fails immediately instead of silently talking to nobody.
-    """
+    """Hand a task to another bot WITHOUT waiting -- use for real work
+    (research, multi-step tasks) instead of message_bot(), so you stay
+    responsive. from_bot is YOUR OWN name (required -- there's no other
+    way to know where to deliver the result). Returns a task_id
+    immediately; the result arrives later as a new message in your own
+    session, prefixed "[delegated task <id> from <to_bot>]" -- summarize
+    it when it arrives, don't paste it verbatim. Raises up front if
+    to_bot isn't a real bot."""
     await _require_bot(to_bot)
     task_id = f"task-{int(time.time() * 1000)}"
     _fire_and_forget(_run_delegated_task(task_id, from_bot, to_bot, task))

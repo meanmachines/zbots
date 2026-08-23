@@ -161,4 +161,6 @@ async def test_require_bot_reports_no_match_when_nothing_close():
     with patch.object(sup.httpx, "AsyncClient", lambda **kw: _roster_client(["default"])):
         with pytest.raises(sup.BotNotFound) as exc_info:
             await sup._require_bot("zzzzzz")
-    assert "no similarly" in str(exc_info.value)
+    message = str(exc_info.value)
+    assert "zzzzzz" in message
+    assert "Did you mean" not in message

@@ -6,6 +6,18 @@ tagged on `main`.
 
 ## [Unreleased]
 
+### Changed
+- `supervisor_mcp.py`'s tool docstrings trimmed to what a model actually
+  needs to use each tool -- the "why"/incident history moved to code
+  comments instead. Unlike hermes-agent's own built-in tools (routed
+  through a capped, deferred `tool_search` catalog), an external MCP
+  server's tool descriptions are sent to the model in full on every
+  turn, uncapped. Measured live: a trivial "what is 15 plus 27" cost
+  31,337 input tokens with the verbose docstrings attached, 15,673 with
+  the trimmed ones -- same question, same bot, same provider, ~50%
+  fewer tokens. Bundled skills (`no_skills`) had zero measurable effect
+  on this cost, so this -- not the skill catalog -- was the real lever.
+
 ### Added
 - Frontend: a bot's chat now shows only each exchange's real final
   answer, not every intermediate "let me check..." narration step along
