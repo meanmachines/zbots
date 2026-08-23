@@ -7,6 +7,24 @@ tagged on `main`.
 ## [Unreleased]
 
 ### Fixed
+- Cron routines that deliver into a specific bot's chat (the "ask me
+  something every N minutes" pattern) now actually work. Root cause,
+  confirmed by checking every real hermes-agent delivery path rather than
+  guessing: `deliver: bot-chat:<name>` needs a real hermes *profile*
+  (zBots bots are sessions under one shared profile, not separate
+  profiles -- `Profile 'assistant' does not exist`); `deliver: origin`
+  resolves cleanly but has no working adapter for the `api_server`
+  platform zBots' own chat runs on (reported success, delivered nothing --
+  confirmed live, message count never moved); `cron/scheduler.py` has zero
+  references to `api_server` at all. None of hermes-agent's native cron
+  delivery targets a zBots bot's session. The real fix needed no new
+  code: `bot-supervisor`'s own `message_bot` tool already does exactly
+  this (inject as an inbound turn, get the target bot's own real,
+  persisted reply) -- so the fix is entirely in the job's own prompt
+  (call `message_bot` directly, `deliver: local`) rather than hermes'
+  external delivery mechanism at all. Added `PUT /cron/{id}` (zBots' side
+  was missing the update proxy for this) to make jobs actually editable
+  instead of delete-and-recreate.
 - `stale_model_lock_rolls_over`'s detection was too narrow -- it only
   matched the exact wording "not a valid model" and missed a second,
   differently-worded rejection from the same class of bug, confirmed live

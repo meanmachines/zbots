@@ -1301,6 +1301,15 @@ async def create_cron_job(body: CronCreate) -> dict:
     return await dash_send("POST", "/api/cron/jobs", body.model_dump())
 
 
+class CronUpdate(BaseModel):
+    updates: dict
+
+
+@app.put("/cron/{job_id}")
+async def update_cron_job(job_id: str, body: CronUpdate) -> dict:
+    return await dash_send("PUT", f"/api/cron/jobs/{job_id}", body.model_dump())
+
+
 @app.delete("/cron/{job_id}")
 async def delete_cron_job(job_id: str) -> dict:
     return await dash_send("DELETE", f"/api/cron/jobs/{job_id}", None)
