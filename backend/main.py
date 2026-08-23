@@ -303,39 +303,26 @@ async def send_to_bot(profile: str, message: str, *, timeout: float = 300.0) -> 
 
 
 async def stream_to_bot(profile: str, message: str):
-    """SSE-shaped variant of send_to_bot() for the interactive chat UI.
-
-    Not real per-token streaming right now -- this is a placeholder that
-    keeps the /messages/stream endpoint and its frontend contract working
-    while the engine runs in-process. The original version of this function
-    proxied the engine's own POST /api/sessions/{id}/chat/stream straight
-    through as SSE for real live-typing deltas; that endpoint is
-    aiohttp-handler-shaped (_handle_session_chat_stream) the same way
-    _handle_session_chat is, and engine.py doesn't have an in-process
-    wrapper for it yet (see engine.py's module docstring for the
-    make_mocked_request pattern the non-streaming path already uses --
-    the streaming handler would need the same treatment, plus real handling
-    for a chunked/streaming response instead of one final web.Response).
-    Until that exists, this synthesizes one big "delta" from the already-
-    embedded, already-tested send_to_bot() -- the frontend still gets a
-    real answer, just without live per-token deltas.
-
-    Also worth keeping for whenever real streaming does get built: a real
-    upstream bug found live in the old HTTP-sidecar version, not
-    hypothetical -- the engine's /chat/stream failed to resolve ANY
-    provider through the /p/<profile>/ multiplex mirror (every bot except
-    "default"), always responding with an in-stream `event: error` ("No
-    LLM provider configured"), even with an explicit model/provider in the
-    request body. Confirmed not a multiplex-general issue: the same
-    request against the non-multiplexed default profile streamed real
-    deltas with correctly-resolved runtime.provider/model. Whether this
-    still applies once _handle_session_chat_stream is called in-process
-    (profile scoping works differently there, see _profile_scope) is
-    unverified -- check for it again before assuming it's fixed.
+    """SSE variant of send_to_bot() for the interactive chat UI -- real
+    per-token deltas from the engine's own streaming handler, run in-process
+    via engine.stream_to_bot() (see its docstring for how a StreamResponse-
+    shaped aiohttp handler runs without a real socket, and for the
+    session-rollover retry it does internally on a real, common failure
+    class). Session bookkeeping mirrors send_to_bot()'s own pattern, with
+    one difference forced by streaming: engine.stream_to_bot() can still
+    change which session ended up serving the reply mid-stream (a
+    rollover), so the final session id is only known once the stream is
+    fully drained -- read back from session_state AFTER the loop, not
+    before it, unlike send_to_bot()'s single return value.
     """
-    reply = await send_to_bot(profile, message)
-    yield "event: assistant.delta\n" + f"data: {json.dumps({'delta': reply})}\n\n"
-    yield "event: run.completed\n" + f"data: {json.dumps({'completed': True})}\n\n"
+    state = _read_state()
+    active_id = (state.get("active_sessions") or {}).get(profile)
+    session_state, chunks = await _engine.stream_to_bot(profile, message, API_SERVER_KEY, active_id)
+    async for chunk in chunks:
+        yield chunk
+    final_session_id = session_state["session_id"]
+    if final_session_id != active_id:
+        await _mutate_state(lambda d: d.setdefault("active_sessions", {}).__setitem__(profile, final_session_id))
 
 
 async def get_bot_activity(profile: str) -> dict:

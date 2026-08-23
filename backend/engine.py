@@ -413,6 +413,233 @@ async def send_to_bot(
     return persona.redact_branding_leaks(reply), session_id
 
 
+# --------------------------------------------------------------------------
+# Real streaming -- runs the engine's actual SSE handler in-process, same
+# philosophy as _call_handler above (call the real, tested aiohttp handler
+# method directly instead of reimplementing it) but that helper only
+# supports a single final web.Response; _handle_session_chat_stream returns
+# a web.StreamResponse, which prepares itself against the REQUEST's own
+# writer rather than a real socket (aiohttp internal:
+# StreamResponse._start() sets self._payload_writer = request._payload_writer,
+# confirmed by reading aiohttp's own web_response.py). Supplying a custom
+# writer whose write()/write_eof() push chunks onto an asyncio.Queue instead
+# of a transport is exactly what aiohttp.test_utils.make_mocked_request's
+# own writer= parameter exists for -- aiohttp's own test suite drives
+# streaming handlers the same way. Not a zBots-invented mechanism, and it
+# means every event the real handler produces (tool progress, reasoning,
+# the final assistant.completed/run.completed bookkeeping) reaches the
+# client exactly as upstream built it; zBots only consumes the frames the
+# frontend already knows how to render (assistant.delta) and ignores the
+# rest, so richer events later light up automatically with no wire-format
+# changes needed here.
+# --------------------------------------------------------------------------
+
+
+class _QueueStreamWriter:
+    """Stand-in for aiohttp's real StreamWriter (the AbstractStreamWriter
+    protocol a Request/Response need) -- captures every write() into an
+    asyncio.Queue instead of a transport, so a caller can consume the real
+    handler's output live as it's produced.
+    """
+
+    def __init__(self) -> None:
+        self.queue: "asyncio.Queue[Optional[bytes]]" = asyncio.Queue()
+        self.output_size = 0
+        # StreamResponse._prepare_headers reads/sets this directly (no
+        # Content-Length on an SSE response -> it stays None -> aiohttp
+        # decides to chunk) and calls enable_chunking() when it does; both
+        # are real-writer bookkeeping for wire-level chunked-transfer
+        # framing zBots never emits (write() below forwards raw chunk
+        # bytes untouched), so both are no-ops here.
+        self.length: Optional[int] = None
+
+    async def write_headers(self, status_line: str, headers: Any) -> None:
+        # Headers never reach a real socket here -- main.py's own
+        # StreamingResponse sets the Content-Type the client actually sees.
+        pass
+
+    def send_headers(self) -> None:
+        pass
+
+    def enable_chunking(self) -> None:
+        pass
+
+    async def write(self, chunk: bytes, *args: Any, **kwargs: Any) -> None:
+        data = bytes(chunk)
+        self.output_size += len(data)
+        await self.queue.put(data)
+
+    async def write_eof(self, chunk: bytes = b"") -> None:
+        if chunk:
+            await self.write(chunk)
+        await self.queue.put(None)
+
+    async def drain(self) -> None:
+        pass
+
+
+def _maybe_redact_sse_frame(raw: bytes, sse_frame_fn) -> bytes:
+    """Apply the same branding-safety scrub send_to_bot() applies to a full
+    reply, to one already-framed SSE chunk from the real streaming handler.
+
+    Only touches assistant.delta frames -- the only event type carrying
+    model-generated free text; run.started/tool.progress/done/keepalive
+    comments and everything else pass through byte-identical. Known, narrow
+    gap: a leaked phrase split exactly across two separate write() calls
+    escapes this (each frame is scrubbed in isolation) -- no worse than
+    doing nothing, since a blocking, non-streaming reply had no equivalent
+    boundary to split across; buffering the whole reply just to close that
+    gap would defeat the point of streaming it live.
+    """
+    if not raw.startswith(b"event:"):
+        return raw
+    try:
+        import json as _json
+
+        text = raw.decode("utf-8")
+        header_line, _, rest = text.partition("\n")
+        event_name = header_line.split(":", 1)[1].strip()
+        if event_name != "assistant.delta":
+            return raw
+        data_line = rest.strip()
+        if not data_line.startswith("data:"):
+            return raw
+        payload = _json.loads(data_line[len("data:") :].strip())
+        delta = payload.get("delta")
+        if not isinstance(delta, str) or not delta:
+            return raw
+        payload["delta"] = persona.redact_branding_leaks(delta)
+        return sse_frame_fn(payload, event=event_name, ensure_ascii=False)
+    except Exception:
+        # Never let a redaction bug break the stream itself -- worst case
+        # is the same unredacted frame the caller already had.
+        return raw
+
+
+async def _run_stream_attempt(profile: str, session_id: str, message: str, headers: dict):
+    """One real streaming attempt against session_id. Yields
+    (sse_frame_bytes, was_error) pairs live as the real handler produces
+    them -- was_error is True exactly once, on the frame that reports the
+    handler's own `event: error` (if any); every other frame reports False.
+    """
+    from aiohttp.base_protocol import BaseProtocol
+    from aiohttp.streams import StreamReader
+    from aiohttp.test_utils import make_mocked_request
+    from multidict import CIMultiDict
+    import json as _json
+
+    from gateway.platforms.api_server import _sse_frame
+
+    body_bytes = _json.dumps({"message": message}).encode("utf-8")
+    request_headers = CIMultiDict(headers)
+    request_headers["Content-Type"] = "application/json"
+    request_headers["Content-Length"] = str(len(body_bytes))
+    payload = StreamReader(BaseProtocol(loop=None), limit=2**20, loop=None)
+    payload.feed_data(body_bytes)
+    payload.feed_eof()
+
+    writer = _QueueStreamWriter()
+    adapter = _get_adapter()
+    await _ensure_mcp_tools_discovered()
+    request = make_mocked_request(
+        "POST",
+        f"/api/sessions/{session_id}/chat/stream",
+        headers=request_headers,
+        payload=payload,
+        match_info={"session_id": session_id},
+        writer=writer,
+    )
+
+    async def _run() -> None:
+        try:
+            with _profile_scope(profile):
+                await adapter._handle_session_chat_stream(request)
+        except Exception as exc:
+            await writer.queue.put(
+                _sse_frame({"message": str(exc)}, event="error", ensure_ascii=False)
+            )
+        finally:
+            await writer.queue.put(None)
+
+    task = asyncio.create_task(_run())
+    try:
+        while True:
+            chunk = await writer.queue.get()
+            if chunk is None:
+                break
+            yield _maybe_redact_sse_frame(chunk, _sse_frame), chunk.startswith(b"event: error\n")
+    finally:
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except Exception:
+            pass
+
+
+async def stream_to_bot(
+    profile: str, message: str, api_server_key: str, active_session_id: Optional[str]
+) -> tuple[dict, Any]:
+    """Real per-token streaming: return (session_state, async_iterator_of_sse_bytes).
+
+    session_state is a plain {"session_id": ...} dict the caller re-reads
+    AFTER fully draining the iterator (not before -- a rollover mid-stream,
+    see below, can change which session actually ended up serving the
+    reply). Session lookup/creation mirrors send_to_bot()'s own
+    _ensure_bot_chat_session call.
+
+    Real bug found live, and this is the fix: a session's SECOND message
+    onward reliably fails with `event: error` / "No LLM provider
+    configured" whenever the active model routes through a custom
+    endpoint (providers.<id> in config.yaml -- confirmed for BOTH zBots'
+    own self-hosted "zbots" entry and a freshly-added one, so this isn't
+    specific to any one provider). Root cause, traced live: the engine
+    persists a session-level model lock after its first reply, and a
+    custom endpoint's lock round-trips through that as the bare string
+    "custom" -- enough to know it WAS a custom endpoint, not enough to
+    know WHICH one, so credential resolution on the next message has
+    nothing to authenticate with. A session's first-ever message never
+    hits this (nothing stored yet to misresolve). send_to_bot()'s existing
+    rollover logic has been silently absorbing this the entire time this
+    session's chat has been in use -- every reply after the first in a
+    conversation was actually a fresh, silently-rolled-over session
+    underneath, not a continuation of the same one, which is why it was
+    never noticed as a visible failure. This is that same rollover
+    protection, adapted for a live stream: since the frontend only acts on
+    assistant.delta events (see app.js's streamBotReply -- run.started/
+    message.started/error/done are already inert to it), attempt 1's
+    setup/error frames can be forwarded live with zero visible effect, and
+    a rolled-over attempt 2 starting immediately after looks identical to
+    one continuous stream. Retried once, matching send_to_bot()'s own
+    single-retry policy -- if attempt 2 also errors, its frames still reach
+    the client (nothing left to fall back to).
+
+    The actual hermes-agent bug (session-lock serialization losing which
+    custom endpoint it was) is not fixed here -- fixing that means tracing
+    _persist_session_runtime_lock/_stored_session_model inside the
+    vendored engine itself, a real change to make upstream, not a zBots
+    workaround to reach for. Rollover was already the established pattern
+    for exactly this class of failure; this keeps the streaming path
+    consistent with it instead of inventing a second mechanism.
+    """
+    headers = _api_headers(api_server_key)
+    session_id, all_sessions = await _ensure_bot_chat_session(profile, headers, active_session_id)
+    state = {"session_id": session_id}
+
+    async def _chunks():
+        saw_error = False
+        async for frame, was_error in _run_stream_attempt(profile, state["session_id"], message, headers):
+            yield frame
+            saw_error = saw_error or was_error
+        if saw_error:
+            new_sid = await _roll_over_bot_session(profile, headers, all_sessions)
+            state["session_id"] = new_sid
+            async for frame, _was_error in _run_stream_attempt(profile, new_sid, message, headers):
+                yield frame
+
+    return state, _chunks()
+
+
 async def get_bot_messages(profile: str, api_server_key: str, limit: int = 200) -> list[dict]:
     """Every message across this bot's whole session family, oldest first.
 

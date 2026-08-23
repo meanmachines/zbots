@@ -7,6 +7,36 @@ tagged on `main`.
 ## [Unreleased]
 
 ### Added
+- Real per-token streaming: chat replies now stream live from the engine's
+  own SSE handler (`_handle_session_chat_stream`) instead of waiting for
+  the full reply and sending it as one block. Runs the real handler
+  in-process by giving it a custom writer (the same mechanism
+  `aiohttp.test_utils.make_mocked_request`'s own `writer=` parameter
+  exists for -- aiohttp's own test suite drives streaming handlers this
+  way) that captures each write() into a queue instead of a socket, so no
+  wire-format or frontend changes were needed: the frontend already only
+  acts on `assistant.delta` events, and the real handler already emits
+  exactly that.
+- Along the way, a real bug in the engine itself: a session's SECOND
+  message onward reliably failed with "No LLM provider configured"
+  whenever the active model was a custom endpoint (`providers.<id>` in
+  config.yaml) -- reproduced for both zBots' own self-hosted provider and
+  a freshly-added one, so not specific to any one provider. Root cause:
+  the engine persists a session-level model lock after the first reply,
+  and a custom endpoint's lock round-trips through that as the bare
+  string `"custom"` -- enough to know it was a custom endpoint, not which
+  one, so the next message's credential resolution has nothing to
+  authenticate with. `send_to_bot()`'s existing rollover-on-failure logic
+  had been silently absorbing this the entire time chat has been in use
+  -- every reply after a session's first was actually served by a fresh,
+  silently-rolled-over session underneath, which is why this was never
+  visibly noticed. The streaming path now gets the same protection
+  (`engine.stream_to_bot()`'s own rollover, retried once): the frontend
+  already ignores every SSE event except `assistant.delta`, so a failed
+  first attempt's setup/error frames are invisible and a rolled-over
+  retry looks like one continuous stream. The underlying hermes-agent bug
+  itself (session-lock serialization losing which custom endpoint it was)
+  is not fixed here -- that's a real upstream fix, not a zBots workaround.
 - Provider self-service (`POST /providers`, `/providers/{id}/activate`,
   `POST /models/activate`, `DELETE /providers/{id}` -- the same add/edit/
   activate/delete flow the Models page already exposed) now calls
