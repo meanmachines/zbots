@@ -459,6 +459,7 @@ async def create_bot(body: BotCreate) -> RosterEntry:
         await _mutate_state(lambda d: d["titles"].__setitem__(name, body.title))
     if body.soul:
         await dash_send("PUT", f"/api/profiles/{name}/soul", {"content": body.soul})
+    _engine.invalidate_adapter()
     if provider and model:
         # Real bug found live: Hermes' own profile-level provider storage
         # silently coerces any provider name it doesn't recognize as one
@@ -521,6 +522,16 @@ async def update_bot(name: str, body: BotUpdate) -> dict:
         await _lock_active_session_model(name, body.provider, body.model)
     if body.soul is not None:
         await dash_send("PUT", f"/api/profiles/{name}/soul", {"content": body.soul})
+    if body.description is not None or body.soul is not None or (body.provider and body.model):
+        # Real bug found live: a soul/model/description change written
+        # through the dashboard API above takes effect immediately for
+        # anything that reads the profile fresh (the roster, the CLI),
+        # but the embedded chat engine kept answering with the
+        # pre-mutation persona until the whole backend process was
+        # restarted -- confirmed with a controlled test (same fresh
+        # session either way; only a process restart changed the
+        # outcome). See engine.invalidate_adapter()'s own docstring.
+        _engine.invalidate_adapter()
     return {"ok": True}
 
 

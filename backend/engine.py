@@ -87,6 +87,28 @@ def _get_adapter():
     return _adapter
 
 
+def invalidate_adapter() -> None:
+    """Force the next _get_adapter() call to rebuild from scratch.
+
+    Real bug found live: a profile mutation made through the dashboard
+    HTTP API (soul, model, ...) writes to disk correctly, but the
+    embedded engine kept answering chat with the pre-mutation persona
+    until the whole backend process was restarted -- confirmed by a
+    controlled test (fresh session either way; only a process restart
+    changed the outcome). config.yaml's own load_config() is smart about
+    this (cached on the file's mtime/size, auto-invalidates), but
+    whatever holds a profile's resolved persona inside the constructed
+    GatewayRunner/APIServerAdapter apparently isn't. Rather than fully
+    tracing that cache through hermes-agent's own source, this resets
+    the one piece of caching zBots itself controls -- call it after any
+    dash_send() that changes a profile's soul/model/skills, and the next
+    chat call gets a fresh adapter instead of a stale one.
+    """
+    global _runner, _adapter
+    _runner = None
+    _adapter = None
+
+
 _mcp_discovery_done = False
 _mcp_discovery_lock = asyncio.Lock()
 
