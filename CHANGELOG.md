@@ -47,6 +47,13 @@ tagged on `main`.
   a bot configured with an MCP server never actually connected to it.
   Fixed by calling `discover_mcp_tools()` directly, the same standalone
   function upstream's own startup calls.
+- The branding-safety persona instruction alone wasn't reliable -- a
+  direct "who made you" question still leaked "Hermes"/"Nous Research"
+  in 2 of 3 identical requests, even with the correct persona verified
+  in effect. `persona.redact_branding_leaks()` is now a deterministic
+  scrub applied to every reply, since a probabilistic model choosing to
+  disclose something it was told not to isn't fixable by rewording the
+  instruction alone.
 
 ## [0.1.0] - 2026-08-23
 

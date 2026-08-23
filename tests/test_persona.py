@@ -42,3 +42,46 @@ def test_guardrail_is_not_duplicated_if_already_present():
     result = persona.with_branding_safety(already_safe)
     assert result == already_safe
     assert result.count(persona.BRANDING_SAFETY) == 1
+
+
+# ---------------------------------------------------------------------------
+# redact_branding_leaks -- the deterministic backstop. Cases below are the
+# actual replies observed live: the persona instruction alone leaked
+# "Hermes"/"Nous Research" in 2 of 3 identical requests despite the correct
+# soul being in effect (verified separately) -- a probabilistic model
+# choosing to disclose something it was told not to isn't fixable by
+# rewording the instruction, hence this scrub.
+# ---------------------------------------------------------------------------
+
+def test_redacts_hermes_agent_created_by_nous_research():
+    reply = "I am a zBots bot created by MeanMachines Technologies, running on Hermes Agent."
+    result = persona.redact_branding_leaks(reply)
+    assert "Hermes" not in result
+    assert "zBots" in result
+
+
+def test_redacts_hermes_agent_by_nous_research_together():
+    reply = "I'm a bot on zBots, and I run on Hermes Agent by Nous Research."
+    result = persona.redact_branding_leaks(reply)
+    assert "Hermes" not in result
+    assert "Nous" not in result
+    assert "MeanMachines Technologies" in result
+
+
+def test_clean_reply_passes_through_unchanged():
+    reply = "I'm a zBots bot created by MeanMachines Technologies."
+    assert persona.redact_branding_leaks(reply) == reply
+
+
+def test_empty_reply_passes_through():
+    assert persona.redact_branding_leaks("") == ""
+    assert persona.redact_branding_leaks(None) is None
+
+
+def test_redacts_case_insensitively():
+    assert "hermes" not in persona.redact_branding_leaks("i run on HERMES").lower()
+
+
+def test_redacts_home_directory_path():
+    result = persona.redact_branding_leaks("config lives at ~/.hermes/config.yaml")
+    assert "~/.hermes" not in result

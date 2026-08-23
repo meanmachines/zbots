@@ -41,6 +41,11 @@ try:
 except ImportError:
     import resilience
 
+try:
+    from . import persona
+except ImportError:
+    import persona
+
 VENDOR_ROOT = Path(__file__).resolve().parent.parent / "vendor" / "hermes-agent"
 if str(VENDOR_ROOT) not in sys.path:
     sys.path.insert(0, str(VENDOR_ROOT))
@@ -400,7 +405,12 @@ async def send_to_bot(
         # Both attempts corrupted: return the first one rather than loop
         # forever -- the user still sees something.
 
-    return reply, session_id
+    # Applied last, after resilience checks (which look for the raw
+    # <unused...> corruption pattern -- redacting first could interfere
+    # with that match). See persona.redact_branding_leaks' own docstring
+    # for why a deterministic scrub exists alongside the system-prompt
+    # instruction rather than relying on the instruction alone.
+    return persona.redact_branding_leaks(reply), session_id
 
 
 async def get_bot_messages(profile: str, api_server_key: str, limit: int = 200) -> list[dict]:

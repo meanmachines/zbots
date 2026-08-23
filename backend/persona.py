@@ -23,7 +23,29 @@ Callers should prepend/append their own persona details to
 BRANDING_SAFETY, not replace it -- the two guardrails in it (no internal
 leakage, use create_bot instead of improvising) apply to every bot
 regardless of what else its persona says.
+
+A system prompt is guidance, not a hard constraint -- confirmed live:
+even with the correct persona in place and verified to actually be in
+effect (see engine.invalidate_adapter's own incident), the same "who
+made you" question leaked "Hermes"/"Nous Research" in 2 of 3 identical
+requests. No amount of prompt wording fixes a probabilistic model
+choosing to disclose something it was told not to. redact_branding_leaks
+is the deterministic backstop: a plain string scrub applied to every
+reply right before it reaches the user, in engine.py's send_to_bot, so
+the instruction and the backstop cover each other's gaps instead of
+either one alone being asked to guarantee something neither fully can.
 """
+
+import re
+
+_LEAK_PATTERNS: list[tuple[re.Pattern, str]] = [
+    # Longest/most specific phrases first -- once a span is replaced it's
+    # gone, so a shorter pattern below can't double-mangle it.
+    (re.compile(r"hermes[\s-]agent", re.IGNORECASE), "zBots"),
+    (re.compile(r"nous research", re.IGNORECASE), "MeanMachines Technologies"),
+    (re.compile(r"\bhermes\b", re.IGNORECASE), "zBots"),
+    (re.compile(r"~/\.hermes\b"), "the app's data directory"),
+]
 
 BRANDING_SAFETY = (
     "Never mention Hermes, Nous Research, hermes-agent, or any internal "
@@ -57,3 +79,14 @@ def with_branding_safety(soul: str) -> str:
     if not soul:
         return DEFAULT_SOUL
     return f"{soul}\n\n{BRANDING_SAFETY}"
+
+
+def redact_branding_leaks(reply: str) -> str:
+    """Deterministic last line of defense: replace any mention of the
+    underlying engine or its makers that slipped past the persona
+    instruction. Order matters -- see _LEAK_PATTERNS' own comment."""
+    if not reply:
+        return reply
+    for pattern, replacement in _LEAK_PATTERNS:
+        reply = pattern.sub(replacement, reply)
+    return reply
