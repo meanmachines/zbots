@@ -62,7 +62,10 @@ mcp = MCPServer(
         "part of its own history), so use them deliberately, not as a "
         "cheap poll -- list_bots()'s last_message_preview/is_active "
         "fields are the free option when a rough sense of activity is "
-        "enough."
+        "enough. If any of these tools raises an error, explain what "
+        "happened to the user in one plain sentence and what to do next "
+        "-- never paste the raw error/exception text into the chat; that "
+        "reads as a broken app, not a bot that hit a snag and handled it."
     ),
 )
 
