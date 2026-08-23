@@ -91,6 +91,17 @@ def test_stale_model_lock_reply_asks_for_rollover():
     assert decision.mode is r.RetryMode.ROLLOVER
 
 
+def test_stale_model_lock_catches_a_differently_worded_provider_error_too():
+    # Real bug found live: the first version of this check only matched the
+    # "not a valid model" wording and missed this second, differently
+    # worded rejection from a different provider on the same class of
+    # failure -- the fix is matching on shape (starts with "HTTP <code>:"),
+    # not on any one provider's specific error text.
+    reply = "HTTP 400: Model ID 'deepseek-chat' is ambiguous -- it matches multiple models: deepseek/deepseek-chat, deepseek/deepseek-chat-v2.5."
+    decision = r.stale_model_lock_rolls_over(status=200, body={}, reply=reply)
+    assert decision.mode is r.RetryMode.ROLLOVER
+
+
 def test_a_real_reply_that_merely_mentions_http_is_not_flagged():
     # The anchor is deliberately strict (reply must START with "HTTP <code>:
     # ... not a valid model") -- a real answer that happens to discuss HTTP

@@ -7,6 +7,15 @@ tagged on `main`.
 ## [Unreleased]
 
 ### Fixed
+- `stale_model_lock_rolls_over`'s detection was too narrow -- it only
+  matched the exact wording "not a valid model" and missed a second,
+  differently-worded rejection from the same class of bug, confirmed live
+  right after the first fix shipped ("HTTP 400: Model ID 'deepseek-chat'
+  is ambiguous -- it matches multiple models"). Broadened to match on
+  shape alone (any reply starting with "HTTP <code>:"), matching what the
+  check's own docstring already said it should be doing -- no real
+  assistant reply opens with that literal string, regardless of which
+  provider produced the underlying rejection or how it worded it.
 - A new persona guardrail, `RESPONSE_STYLE`, alongside `BRANDING_SAFETY`
   (both now applied together by `with_branding_safety()`): real bug found
   live, a blocked or uncertain bot would write its own reasoning process

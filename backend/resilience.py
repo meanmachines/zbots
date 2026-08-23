@@ -73,7 +73,7 @@ def server_error_rolls_over(*, status: int, body: Optional[dict], reply: str) ->
     return RetryDecision(RetryMode.NONE)
 
 
-_STALE_MODEL_LOCK_RE = re.compile(r"^HTTP \d{3}: .*not a valid model")
+_STALE_MODEL_LOCK_RE = re.compile(r"^HTTP \d{3}:")
 
 
 def stale_model_lock_rolls_over(*, status: int, body: Optional[dict], reply: str) -> RetryDecision:
@@ -84,11 +84,18 @@ def stale_model_lock_rolls_over(*, status: int, body: Optional[dict], reply: str
     turn. When the new provider is unreachable/misconfigured that surfaces
     as a >=500 (server_error_rolls_over already catches it); when the
     provider is reachable but simply doesn't recognize the stale model id,
-    it instead answers 200 with its own rejection ("HTTP 400: <old-model>
-    is not a valid model ID") delivered AS the reply text -- confirmed
-    live switching to OpenRouter with an existing zbots-provider session.
-    status alone can't distinguish this from a real reply, so the check is
-    on shape: a real assistant reply doesn't start with "HTTP <code>:".
+    it instead answers 200 with its own rejection delivered AS the reply
+    text -- confirmed live twice, with two DIFFERENT wordings from two
+    different providers ("HTTP 400: <old-model> is not a valid model ID"
+    switching to OpenRouter's Nemotron; "HTTP 400: Model ID 'deepseek-chat'
+    is ambiguous -- it matches multiple models" on a session that predated
+    an OpenRouter model catalog change). The first version of this check
+    matched only the first exact wording and missed the second live in
+    production -- status alone can't distinguish either from a real reply,
+    and neither can a specific error phrase, since the provider decides the
+    wording, not this code. The only thing every real assistant reply
+    reliably never does is open with the literal string "HTTP <code>:", so
+    that's the actual check, deliberately broader than any one message.
     """
     if status < 400 and _STALE_MODEL_LOCK_RE.match((reply or "").strip()):
         return RetryDecision(RetryMode.ROLLOVER, "stale model lock")
