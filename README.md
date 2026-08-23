@@ -106,6 +106,14 @@ pytest tests
 The test suite mocks both engine surfaces, so it runs without a live
 engine instance.
 
+### Branches
+
+`main` is stable and deployable -- nothing gets pushed to it directly.
+Ongoing work happens on `dev` (or a feature branch merged into `dev`),
+and reaches `main` only through a pull request once CI is green. CI
+(`.github/workflows/ci.yml`) runs the test suite on every push to either
+branch and on every pull request.
+
 ## Roadmap
 
 - Local desktop app (packaged executable) and a CLI, talking to the same

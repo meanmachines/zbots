@@ -1,6 +1,9 @@
 # Dev/test dependencies for zBots itself.
-# Production runs inside hermes-agent-wrapper's container, which already has
-# FastAPI/uvicorn/httpx (and python-multipart) in Hermes' own venv.
+# Production runs inside zBots' own standalone container (see Dockerfile),
+# which already installs FastAPI/uvicorn/httpx/python-multipart directly.
+# This file exists so the test suite (tests/, mocked at the backend.main
+# boundary -- no live Hermes instance needed) can run without building that
+# whole image, in CI or locally.
 fastapi
 uvicorn
 httpx

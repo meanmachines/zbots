@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The test suite mocks everything at the backend.main boundary
+          # (see tests/test_backend.py's own docstring) -- it never needs a
+          # live Hermes instance, so it never touches vendor/hermes-agent.
+          # Skip fetching that ~170MB snapshot entirely; nothing here reads
+          # it.
+          sparse-checkout: |
+            backend
+            tests
+            requirements-dev.txt
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest tests -v
