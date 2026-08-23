@@ -30,6 +30,7 @@ stay on the existing HTTP calls in main.py.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import sys
 from pathlib import Path
@@ -52,10 +53,14 @@ def _build_runner_and_adapter():
     """One-time construction, mirroring gateway/run.py's start_gateway()
     exactly for the pieces we need -- GatewayRunner() then
     APIServerAdapter() wired to it -- and deliberately skipping
-    runner.start() (spawns every configured platform, PID file, MCP tool
-    discovery) and adapter.connect() (binds a real network listener).
-    Neither is needed: we call the adapter's handler methods as plain
-    Python calls, never over a socket.
+    runner.start() (spawns every configured platform, PID file) and
+    adapter.connect() (binds a real network listener). Neither is needed:
+    we call the adapter's handler methods as plain Python calls, never
+    over a socket. MCP tool discovery is also normally part of
+    runner.start()'s sequence -- that piece IS needed (a configured
+    mcp_servers entry is otherwise never connected, so no bot ever sees
+    those tools), so it's triggered separately; see
+    _ensure_mcp_tools_discovered below.
     """
     from gateway.run import load_gateway_config_for_runner, GatewayRunner
     from gateway.platforms.api_server import APIServerAdapter
@@ -80,6 +85,51 @@ def _get_adapter():
     if _adapter is None:
         _runner, _adapter = _build_runner_and_adapter()
     return _adapter
+
+
+_mcp_discovery_done = False
+_mcp_discovery_lock = asyncio.Lock()
+
+
+async def _ensure_mcp_tools_discovered() -> None:
+    """One-time, lazy MCP tool discovery for the embedded engine.
+
+    gateway/run.py's normal startup calls tools.mcp_tool.discover_mcp_tools()
+    right before runner.start() -- both are part of the same sequence, but
+    only runner.start() gets deliberately skipped here (see
+    _build_runner_and_adapter's docstring for why). Skipping discovery too
+    was never intentional, just a side effect of skipping start() wholesale
+    -- confirmed live: a bot correctly listed every one of its other tools
+    but had never heard of bot-supervisor's list_bots, despite it being
+    registered in config.yaml's mcp_servers and the server itself running
+    and reachable.
+
+    discover_mcp_tools() is a standalone, idempotent, cross-process-locked
+    function -- calling it here doesn't reimplement any of that, just
+    triggers the one piece of runner.start() this embedding actually
+    needs. Runs in the executor because it can block up to ~120s
+    internally (a slow/unreachable MCP server), same as upstream's own
+    call site; the lock only prevents two concurrent chat requests both
+    kicking off a redundant discovery pass while the first is in flight.
+    """
+    global _mcp_discovery_done
+    if _mcp_discovery_done:
+        return
+    async with _mcp_discovery_lock:
+        if _mcp_discovery_done:
+            return
+        try:
+            from tools.mcp_tool import discover_mcp_tools
+
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, discover_mcp_tools)
+        except Exception:
+            # Fail-soft, matching discover_mcp_tools' own contract ("safe
+            # to call even when the mcp package is not installed") -- a
+            # broken/unreachable MCP server should degrade the bot to
+            # having one fewer tool, not break chat entirely.
+            pass
+        _mcp_discovery_done = True
 
 
 def _profile_scope(profile: str):
@@ -112,6 +162,7 @@ async def _call_handler(
     from multidict import CIMultiDict
 
     adapter = _get_adapter()
+    await _ensure_mcp_tools_discovered()
     handler = getattr(adapter, handler_name)
 
     request_headers = CIMultiDict(headers or {})
