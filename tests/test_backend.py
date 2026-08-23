@@ -257,6 +257,57 @@ def _create_group(client):
     return resp.json()
 
 
+# ---------------------------------------------------------------------------
+# Provider self-service (POST /providers) -- collision guard.
+#
+# Real bug found live: a custom endpoint saved with name "deepseek" reused
+# hermes-agent's own built-in "deepseek" provider slug, so the resolver
+# routed every request through the built-in overlay (which expects
+# DEEPSEEK_API_KEY) instead of the custom entry's own base_url/key_env --
+# auth failed even though the user's key was saved correctly.
+# ---------------------------------------------------------------------------
+
+def test_reserved_provider_ids_includes_known_builtins_and_aliases():
+    reserved = m._reserved_provider_ids()
+    assert "deepseek" in reserved  # PROVIDER_REGISTRY entry
+    assert "qwen" in reserved  # ALIASES entry (-> alibaba)
+
+
+def test_custom_endpoint_id_mirrors_dashboard_slugify():
+    assert m._custom_endpoint_id("DeepSeek Flash") == "deepseek-flash"
+    assert m._custom_endpoint_id("") == "custom"
+
+
+def test_save_provider_rejects_a_name_that_collides_with_a_builtin(client, monkeypatch):
+    async def fake_dash_send(method, path, body):
+        raise AssertionError("dash_send must not be called once the name collides")
+
+    monkeypatch.setattr(m, "dash_send", fake_dash_send)
+
+    resp = client.post(
+        "/providers",
+        json={"name": "deepseek", "base_url": "https://api.deepseek.com/v1", "model": "deepseek-chat"},
+    )
+    assert resp.status_code == 400
+    assert "deepseek" in resp.json()["detail"]
+
+
+def test_save_provider_accepts_a_non_colliding_name_and_invalidates_the_adapter(client, monkeypatch):
+    async def fake_dash_send(method, path, body):
+        return {"ok": True, "id": "deepseek-flash"}
+
+    invalidated = []
+    monkeypatch.setattr(m, "dash_send", fake_dash_send)
+    monkeypatch.setattr(m._engine, "invalidate_adapter", lambda: invalidated.append(True))
+
+    resp = client.post(
+        "/providers",
+        json={"name": "deepseek-flash", "base_url": "https://api.deepseek.com/v1", "model": "deepseek-chat"},
+    )
+    assert resp.status_code == 200
+    assert invalidated == [True]
+
+
 def test_group_update_rename_and_members(client):
     group = _create_group(client)
     resp = client.patch(f"/groups/{group['id']}", json={"name": "Renamed", "members": ["alpha", "gamma"]})

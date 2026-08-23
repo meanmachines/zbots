@@ -257,6 +257,32 @@ except ImportError:
     import engine as _engine
 
 
+def _reserved_provider_ids() -> frozenset[str]:
+    """Built-in provider names hermes-agent's own resolver recognizes
+    (deepseek, groq, mistral, zai, ...) -- imported from the real registry
+    rather than duplicated here, so it can't drift out of date.
+
+    Real bug found live: a custom endpoint saved with name "deepseek"
+    silently got routed through hermes-agent's built-in "deepseek" overlay
+    instead of the custom entry's own base_url/key_env -- same slug, and
+    the resolver checks PROVIDER_REGISTRY first. Every request then failed
+    auth looking for DEEPSEEK_API_KEY, a variable the user never set and
+    had no reason to, since the self-service form never asked for it.
+    """
+    # noqa: PLC0415 -- vendor path only ready once _engine is imported
+    from hermes_cli.auth import PROVIDER_REGISTRY
+    from hermes_cli.providers import ALIASES
+
+    return frozenset(PROVIDER_REGISTRY.keys()) | frozenset(ALIASES.keys())
+
+
+def _custom_endpoint_id(raw: str) -> str:
+    # Mirrors hermes_cli/web_server.py's own _custom_endpoint_id() slug
+    # exactly, so this predicts the real id the dashboard will assign.
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", (raw or "").strip()).strip("-_").lower()
+    return slug or "custom"
+
+
 def _bot_base(profile: str) -> str:
     if profile == "default":
         return API_SERVER_BASE
@@ -971,12 +997,31 @@ class ProviderSave(BaseModel):
 
 @app.post("/providers")
 async def save_provider(body: ProviderSave) -> dict:
-    return await dash_send("POST", "/api/providers/custom-endpoints", body.model_dump())
+    slug = _custom_endpoint_id(body.id or body.name)
+    if slug in _reserved_provider_ids():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f'"{body.name}" is already a built-in provider name hermes-agent '
+                f"recognizes, so it would take over that provider's own auth "
+                f"instead of using your endpoint's. Pick a different name, e.g. "
+                f'"{body.name}-custom".'
+            ),
+        )
+    result = await dash_send("POST", "/api/providers/custom-endpoints", body.model_dump())
+    # Same real bug as create_bot/update_bot's own soul/model edits (see
+    # invalidate_adapter's docstring): a provider added or edited here
+    # writes to disk correctly, but the embedded chat engine keeps using
+    # its already-cached view until this fires.
+    _engine.invalidate_adapter()
+    return result
 
 
 @app.post("/providers/{provider_id}/activate")
 async def activate_provider(provider_id: str) -> dict:
-    return await dash_send("POST", f"/api/providers/custom-endpoints/{provider_id}/activate", None)
+    result = await dash_send("POST", f"/api/providers/custom-endpoints/{provider_id}/activate", None)
+    _engine.invalidate_adapter()
+    return result
 
 
 class ModelActivate(BaseModel):
@@ -990,12 +1035,16 @@ async def activate_model(body: ModelActivate) -> dict:
     the active main-slot model -- distinct from /providers/{id}/activate,
     which always uses whatever model the provider entry itself points at.
     """
-    return await dash_send("POST", "/api/model/set", {"scope": "main", "provider": body.provider, "model": body.model, "task": ""})
+    result = await dash_send("POST", "/api/model/set", {"scope": "main", "provider": body.provider, "model": body.model, "task": ""})
+    _engine.invalidate_adapter()
+    return result
 
 
 @app.delete("/providers/{provider_id}")
 async def delete_provider(provider_id: str) -> dict:
-    return await dash_send("DELETE", f"/api/providers/custom-endpoints/{provider_id}", None)
+    result = await dash_send("DELETE", f"/api/providers/custom-endpoints/{provider_id}", None)
+    _engine.invalidate_adapter()
+    return result
 
 
 class ProviderValidate(BaseModel):

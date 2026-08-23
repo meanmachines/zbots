@@ -6,6 +6,25 @@ tagged on `main`.
 
 ## [Unreleased]
 
+### Added
+- Provider self-service (`POST /providers`, `/providers/{id}/activate`,
+  `POST /models/activate`, `DELETE /providers/{id}` -- the same add/edit/
+  activate/delete flow the Models page already exposed) now calls
+  `engine.invalidate_adapter()` after every mutation, same fix already
+  applied to `create_bot`/`update_bot`: a provider added or activated
+  through this flow used to have no effect on chat until the container
+  restarted.
+- `POST /providers` rejects a custom endpoint name that collides with a
+  built-in provider hermes-agent's own resolver recognizes (`deepseek`,
+  `qwen`, `groq`, ...), with a message suggesting a non-colliding name.
+  Real bug found live: a custom endpoint saved as "deepseek" got silently
+  routed through hermes-agent's built-in `deepseek` overlay instead of the
+  saved entry's own `base_url`/`key_env` -- same slug, and the resolver
+  checks its built-in registry first. Every chat request then failed auth
+  looking for `DEEPSEEK_API_KEY`, a variable the self-service form never
+  asked the user to set. The reserved-name list is imported from
+  hermes-agent's own `PROVIDER_REGISTRY`/`ALIASES`, not duplicated.
+
 ### Changed
 - `supervisor_mcp.py`'s tool docstrings trimmed to what a model actually
   needs to use each tool -- the "why"/incident history moved to code
