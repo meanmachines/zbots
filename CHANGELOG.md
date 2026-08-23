@@ -7,6 +7,20 @@ tagged on `main`.
 ## [Unreleased]
 
 ### Fixed
+- A scheduled routine's own internal trigger text (e.g. "This is your
+  scheduled 5-minute check-in trigger...") rendered as a real "user"
+  chat bubble, as if the person had typed it themselves -- message_bot
+  has to post SOME real inbound turn for the target bot to answer, and
+  with no way to distinguish it from a genuine message, the raw internal
+  prompt was just shown. Fixed with an `[internal-trigger]` marker
+  prefix: `collapseToFinalTurns` (frontend/app.js) now recognizes and
+  hides a user turn carrying it -- ends the previous turn same as a real
+  user message would, but never renders itself, so the reply that
+  follows just shows up on its own, correctly matching a proactive
+  check-in nobody "asked" for. Nothing about delivery changes -- this
+  only controls what's displayed. Applies going forward only; the three
+  check-ins that fired before this landed keep showing their raw
+  trigger text (predate the marker).
 - Cron routines that deliver into a specific bot's chat (the "ask me
   something every N minutes" pattern) now actually work. Root cause,
   confirmed by checking every real hermes-agent delivery path rather than

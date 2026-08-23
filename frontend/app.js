@@ -869,6 +869,24 @@ function extractText(row) {
   return row.text || "";
 }
 
+// Marker prefix for a "user" turn that's actually an internal trigger (a
+// scheduled routine's own instruction text, e.g. "This is your scheduled
+// 5-minute check-in trigger...") rather than something the user typed.
+// Real bug found live: a routine set up to have a bot proactively check in
+// makes that trigger text land as a genuine, persisted user-role message
+// (message_bot posts it the same way a real chat message arrives, and a
+// session legitimately needs SOME inbound turn to answer) -- with no
+// marker, the raw internal prompt rendered as if the user had typed it
+// themselves. The trigger still exists in the real data (nothing about
+// delivery changes) -- this only controls what's DISPLAYED, matching
+// collapseToFinalTurns' own job of hiding real turns that aren't meant
+// for the user to see.
+const INTERNAL_TRIGGER_MARKER = "[internal-trigger]";
+
+function isInternalTrigger(row) {
+  return row.role === "user" && extractText(row).trimStart().startsWith(INTERNAL_TRIGGER_MARKER);
+}
+
 function collapseToFinalTurns(rows) {
   // Between two user messages (or from the start of the thread to the
   // end), the agent loop can take several assistant turns before its
@@ -883,7 +901,14 @@ function collapseToFinalTurns(rows) {
   const collapsed = [];
   let pendingAssistant = null;
   for (const row of rows) {
-    if (row.role === "user") {
+    if (isInternalTrigger(row)) {
+      // Ends the previous turn (same as a real user row would) but never
+      // renders itself -- the reply that follows shows up as if it just
+      // arrived on its own, which is exactly right for a proactive
+      // check-in nobody was supposed to "ask" for.
+      if (pendingAssistant) collapsed.push(pendingAssistant);
+      pendingAssistant = null;
+    } else if (row.role === "user") {
       if (pendingAssistant) collapsed.push(pendingAssistant);
       pendingAssistant = null;
       collapsed.push(row);
