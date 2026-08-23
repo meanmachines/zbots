@@ -29,6 +29,12 @@ if [ ! -f "$HERMES_HOME/config.yaml" ]; then
     # provider configured" during testing was HERMES_HOME not being set on
     # an ad-hoc process restart, not this file. `name`/`model`/
     # `discover_models` mirror the shape a real working profile writes.
+    #
+    # title_generation disabled: engine.py's own session-family tracking
+    # (get_bot_messages, the rollover logic) recognizes a bot's sessions
+    # by a specific title pattern it sets at creation time. Auto-titling
+    # rewrites that title from the opening message's content, which is a
+    # real UX nicety on its own but works against tracking here.
     cat > "$HERMES_HOME/config.yaml" <<EOF
 model:
   provider: zbots
@@ -45,6 +51,9 @@ providers:
 mcp_servers:
   bot-supervisor:
     url: http://127.0.0.1:8645/mcp
+auxiliary:
+  title_generation:
+    enabled: false
 EOF
 fi
 

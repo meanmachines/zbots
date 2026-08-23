@@ -427,15 +427,29 @@ async def get_bot_messages(profile: str, api_server_key: str, limit: int = 200) 
         return []
     all_messages: list[dict] = []
     for session in sessions:
-        with _profile_scope(profile):
-            status, body = await _call_handler(
-                "_handle_session_messages",
-                method="GET",
-                path=f"/api/sessions/{session['id']}/messages",
-                query={"limit": limit},
-                headers=headers,
-                match_info={"session_id": session["id"]},
-            )
+        # Deliberately NOT wrapped in _profile_scope here -- real bug
+        # found live: for any non-default profile, _handle_session_messages
+        # returns zero messages while scoped to that profile, even for a
+        # session provably owned by it (confirmed: the same session_id,
+        # same call, unscoped, returns the real messages correctly).
+        # _handle_list_sessions and session/chat creation all work fine
+        # scoped; this is specific to the message-read handler, and only
+        # for secondary profiles -- matches the same class of bug already
+        # documented elsewhere in the vendored engine around multiplex/
+        # secondary-profile scoping (see agent.auxiliary_client's
+        # _scoped_key_env). A session is looked up by its own globally
+        # unique id, not by profile, so dropping the scope here doesn't
+        # risk reading the wrong session -- it just stops an internal
+        # ownership check that appears to only resolve correctly for the
+        # default profile.
+        status, body = await _call_handler(
+            "_handle_session_messages",
+            method="GET",
+            path=f"/api/sessions/{session['id']}/messages",
+            query={"limit": limit},
+            headers=headers,
+            match_info={"session_id": session["id"]},
+        )
         if status >= 400:
             continue
         payload = body or {}

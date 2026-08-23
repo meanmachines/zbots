@@ -54,6 +54,28 @@ tagged on `main`.
   scrub applied to every reply, since a probabilistic model choosing to
   disclose something it was told not to isn't fixable by rewording the
   instruction alone.
+- Any bot other than "default" had a genuinely empty message history in
+  the UI regardless of how much it had actually chatted -- confirmed
+  live: a real, successful conversation with a second bot showed nothing
+  when viewing that bot directly. Root cause: `get_bot_messages()` was
+  wrapping its per-session message fetch in `_profile_scope`, which
+  causes the underlying engine's message-read handler to return zero
+  results for any non-default profile, even for a session it provably
+  owns (confirmed: the identical call, unscoped, returns the real
+  messages correctly). Session creation and listing were never affected
+  -- only reading a non-default bot's own messages back. Dropped the
+  scope for that one call; a session is already looked up by its own
+  globally unique id, so nothing about correctness depends on it.
+- `title_generation` disabled in the bootstrapped config -- the
+  engine's own auto-titling rewrites a session's title from its opening
+  message, which fights the title pattern zBots' session-family
+  tracking (rollover, `get_bot_messages`) depends on to recognize a
+  bot's own sessions.
+- `create_bot`: a bot asked to create another bot "named X" would
+  sometimes invent a different display title on its own initiative
+  (e.g. asked for "tt", titled it "Travel Planner") -- title now
+  defaults to the given name unless the caller explicitly passes a
+  different one.
 
 ## [0.1.0] - 2026-08-23
 

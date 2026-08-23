@@ -134,6 +134,14 @@ async def create_bot(name: str, title: str = "", description: str = "", persona_
     commands to make a new profile, etc.) bypasses that safeguard, leaves
     the bot broken, and is far slower than this one call.
 
+    title is the display name shown in the roster -- leave it blank to
+    use `name` as-is. Only pass a different title if the user actually
+    asked for one; don't invent a nicer-sounding display name on your
+    own initiative when the user gave you an exact name to use (found
+    live: asked to create a bot "named tt", a model passed name="tt" but
+    title="Travel Planner" -- correct internally, but not what was
+    asked, and confusing since the roster shows the title, not the name).
+
     persona_text is optional -- what this bot should act like (e.g. "a
     research specialist who cites sources"). A branding-safety guardrail
     (never mention this platform's underlying engine or its internals) is
@@ -146,7 +154,7 @@ async def create_bot(name: str, title: str = "", description: str = "", persona_
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(
             f"{BOTS_UI_BASE}/bots",
-            json={"name": name, "title": title, "description": description, "soul": soul},
+            json={"name": name, "title": title or name, "description": description, "soul": soul},
         )
         r.raise_for_status()
         entry = r.json()
