@@ -94,3 +94,25 @@ def test_a_real_reply_that_merely_mentions_http_is_not_flagged_in_a_delta():
     raw = _frame("assistant.delta", {"delta": "By the way, HTTP 400 means a bad request."})
     _out, is_stale = engine._process_sse_frame(raw, _fake_sse_frame)
     assert is_stale is False
+
+
+def test_flags_a_stale_model_lock_in_assistant_completed_too():
+    # Real bug found live, right after the assistant.delta version of this
+    # check shipped: the same underlying failure sometimes streams zero
+    # real tokens at all -- the whole rejection arrives in one
+    # assistant.completed frame instead ("content", not "delta"), which
+    # the delta-only check couldn't see, so it reached a real user
+    # unflagged. Confirmed the exact live payload shape before fixing.
+    raw = _frame("assistant.completed", {
+        "content": "HTTP 400: Model ID 'deepseek-chat' is ambiguous -- it matches multiple models.",
+        "completed": True,
+    })
+    out, is_stale = engine._process_sse_frame(raw, _fake_sse_frame)
+    assert is_stale is True
+    assert b"HTTP 400" in out
+
+
+def test_a_real_completed_reply_is_not_flagged():
+    raw = _frame("assistant.completed", {"content": "Sure, happy to help with that.", "completed": True})
+    _out, is_stale = engine._process_sse_frame(raw, _fake_sse_frame)
+    assert is_stale is False

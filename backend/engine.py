@@ -497,28 +497,35 @@ def _process_sse_frame(raw: bytes, sse_frame_fn) -> tuple[bytes, bool]:
     """Inspect one already-framed SSE chunk from the real streaming
     handler; return (possibly-rewritten frame, is_rollover_worthy).
 
-    Only touches/inspects assistant.delta frames -- the only event type
-    carrying model-generated free text; run.started/tool.progress/done/
-    keepalive comments and everything else pass through byte-identical,
-    never flagged. Two independent things happen in one parse pass since
-    both need the same decoded delta text:
+    Touches/inspects assistant.delta and assistant.completed -- the two
+    event types carrying model-generated free text (delta vs. content
+    respectively); run.started/tool.progress/done/keepalive comments and
+    everything else pass through byte-identical, never flagged. Two
+    independent things happen in one parse pass since both need the same
+    decoded text:
 
     1. Branding-safety redaction (same scrub send_to_bot() applies to a
-       full reply). Known, narrow gap: a leaked phrase split exactly
-       across two separate write() calls escapes this (each frame is
-       scrubbed in isolation) -- no worse than doing nothing, since a
-       blocking, non-streaming reply had no equivalent boundary to split
-       across; buffering the whole reply just to close that gap would
-       defeat the point of streaming it live.
+       full reply). Known, narrow gap on the delta side: a leaked phrase
+       split exactly across two separate write() calls escapes this
+       (each frame is scrubbed in isolation) -- no worse than doing
+       nothing, since a blocking, non-streaming reply had no equivalent
+       boundary to split across; buffering the whole reply just to close
+       that gap would defeat the point of streaming it live.
     2. resilience.stale_model_lock_rolls_over's same detection, applied
        here because THIS failure mode never raises an event: error frame
        -- the underlying provider call succeeds (200) with its own
-       rejection delivered as ordinary-looking delta text, so the
+       rejection delivered as ordinary-looking reply text, so the
        existing "was this frame literally event: error" rollover check
-       (see _run_stream_attempt) can't see it. Confirmed live: switching
-       the active provider mid-conversation left an existing session's
-       stale locked model id streaming straight through as if it were a
-       real reply.
+       (see _run_stream_attempt) can't see it. Confirmed live TWICE, in
+       two different shapes: switching the active provider mid-
+       conversation left an existing session's stale locked model id
+       streaming straight through as assistant.delta chunks the first
+       time: a later session hit the same underlying bug but with zero
+       real token streaming at all -- the whole rejection arrived in one
+       assistant.completed frame instead, which the delta-only version of
+       this check couldn't see, so it reached a real user unflagged.
+       Checking both event shapes is what catches shape currently known
+       to occur; a still-different future shape isn't ruled out.
     """
     if not raw.startswith(b"event:"):
         return raw, False
@@ -528,17 +535,18 @@ def _process_sse_frame(raw: bytes, sse_frame_fn) -> tuple[bytes, bool]:
         text = raw.decode("utf-8")
         header_line, _, rest = text.partition("\n")
         event_name = header_line.split(":", 1)[1].strip()
-        if event_name != "assistant.delta":
+        if event_name not in ("assistant.delta", "assistant.completed"):
             return raw, False
         data_line = rest.strip()
         if not data_line.startswith("data:"):
             return raw, False
         payload = _json.loads(data_line[len("data:") :].strip())
-        delta = payload.get("delta")
-        if not isinstance(delta, str) or not delta:
+        field = "delta" if event_name == "assistant.delta" else "content"
+        text_value = payload.get(field)
+        if not isinstance(text_value, str) or not text_value:
             return raw, False
-        is_stale_lock = bool(resilience._STALE_MODEL_LOCK_RE.match(delta.strip()))
-        payload["delta"] = persona.redact_branding_leaks(delta)
+        is_stale_lock = bool(resilience._STALE_MODEL_LOCK_RE.match(text_value.strip()))
+        payload[field] = persona.redact_branding_leaks(text_value)
         return sse_frame_fn(payload, event=event_name, ensure_ascii=False), is_stale_lock
     except Exception:
         # Never let this break the stream itself -- worst case is the

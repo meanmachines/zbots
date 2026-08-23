@@ -6,6 +6,17 @@ tagged on `main`.
 
 ## [Unreleased]
 
+### Fixed
+- `_process_sse_frame`'s stale-model-lock detection only inspected
+  `assistant.delta` frames -- real bug found live, immediately after a
+  real provider switch: the same underlying failure sometimes streams
+  zero real tokens at all, delivering its whole rejection in one
+  `assistant.completed` frame (`content`, not `delta`) instead, which the
+  delta-only check couldn't see, so it reached a real session unflagged.
+  Now checks both event shapes. Verified against the actual affected
+  session: the same request that previously surfaced the raw error now
+  gets caught and retried automatically, landing on a real answer.
+
 ### Added
 - Four new `bot-supervisor` MCP tools -- `list_routines`, `pause_routine`,
   `resume_routine`, `delete_routine` -- so a bot can manage scheduled
