@@ -549,7 +549,18 @@ function renderChatHeader(entry) {
   const offlineEl = document.getElementById("chat-header-offline");
   if (offlineEl) offlineEl.style.display = entry.gateway_running === false ? "" : "none";
   const modelEl = document.getElementById("chat-header-model");
-  modelEl.textContent = entry.model || "Set model";
+  // A plain textContent assignment made this pill impossible to truncate on
+  // a narrow phone screen: with no wrapping element, the bare text became
+  // an anonymous flex item that ignored max-width and just overflowed
+  // straight through the header's action icons (confirmed live -- a long
+  // model name like "nvidia/Qwen3.6-35B-A3B-NVFP4" rendered on top of the
+  // 4 action buttons, both unreadable). A real inner span gives
+  // text-overflow: ellipsis something it can actually apply to.
+  modelEl.innerHTML = "";
+  const modelText = document.createElement("span");
+  modelText.className = "chat-header-model-text";
+  modelText.textContent = entry.model || "Set model";
+  modelEl.appendChild(modelText);
   modelEl.style.display = "";
   modelEl.title = entry.provider ? `Provider: ${entry.provider} -- click to change model` : "Click to set a model";
   modelEl.onclick = (e) => openModelSwitcher(e, entry.name);

@@ -6,6 +6,24 @@ tagged on `main`.
 
 ## [Unreleased]
 
+### Fixed
+- The entire mobile responsive stylesheet (the `@media (max-width: 860px)`
+  block) sat too early in `styles.css`, before ~600 lines of unconditional
+  desktop rules -- with equal specificity, CSS resolves a tie by source
+  order, so every one of those later desktop rules silently won back over
+  its mobile override on an actual phone. Confirmed live: `#app`'s mobile
+  single-column layout never took effect, leaving the chat pane squeezed
+  into a leftover ~320px column instead of the real ~390px+ viewport width
+  on a phone, which in turn left no room in the chat header for the model
+  name pill (`flex-shrink: 0`, no truncation) -- it rendered on top of the
+  header's action icons, both unreadable. Moved the whole media-query
+  block to the end of the file (standard CSS practice: an override block
+  needs to come after what it overrides when specificity is equal) and
+  made the model pill actually truncate with an ellipsis instead of
+  refusing to shrink, so a long custom-provider model name can't repeat
+  this. Verified with real Chromium screenshots at a 393px phone viewport,
+  before and after, not just by reading the CSS.
+
 ### Added
 - Real per-token streaming: chat replies now stream live from the engine's
   own SSE handler (`_handle_session_chat_stream`) instead of waiting for
