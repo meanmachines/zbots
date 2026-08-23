@@ -41,6 +41,13 @@ RUN pip install --no-cache-dir -e /opt/zbots/vendor/hermes-agent \
 COPY backend/ /opt/zbots/backend/
 COPY frontend/ /opt/zbots/frontend/
 COPY nginx.conf /etc/nginx/conf.d/zbots.conf
+# The nginx package ships its own default site (the stock "Welcome to
+# nginx!" page) still enabled alongside ours. zbots.conf has no catch-all
+# location, so any path it doesn't recognize falls through to that stock
+# page instead of a real 404 -- confirmed live, found via a plain request
+# to the deployed instance's root. Remove it so unmatched paths behave
+# like an actual app instead of leaking that this runs nginx.
+RUN rm -f /etc/nginx/sites-enabled/default
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
