@@ -17,6 +17,36 @@ tagged on `main`.
   the bootstrapped `config.yaml`'s `mcp_servers`.
 - `tests/test_resilience.py`: direct unit coverage for the resilience
   checks, no mocking required.
+- `create_bot` MCP tool: the only correct way for a bot to create another
+  bot, wrapping the real `/bots` registry endpoint. Replaces a real
+  incident where a bot with no purpose-built tool for this fell back to
+  exploring the filesystem and running CLI commands, took ~10 minutes,
+  and left the new bot broken (no explicit model/provider).
+- `backend/persona.py`: a real zBots-branded default persona. Every bot
+  previously inherited the underlying engine's own stock identity
+  verbatim ("You are Hermes Agent, an intelligent AI assistant created
+  by Nous Research") -- found live, from the same incident above.
+- `delegate_task` MCP tool: fire-and-forget task handoff between bots --
+  a bot delegates work to another bot without blocking on it, and the
+  result arrives as a new message in its own session once the worker
+  finishes. See `docs/design/supervisor-delegation.md`.
+- Root nginx timeout for `/bots-api/` raised from nginx's 60s default to
+  300s -- a real, correctly-answered tool-use turn was hitting the
+  default and 504ing even though the backend kept working and produced
+  the right answer.
+
+### Fixed
+- The embedded chat engine cached a profile's resolved persona/model at
+  first use and never re-read it -- a soul/model/description edit made
+  through the dashboard API silently had no effect on chat until the
+  whole container restarted. `engine.invalidate_adapter()` now resets
+  that cache after any such edit, verified live to take effect on the
+  very next message.
+- MCP tool discovery was a silent casualty of the embedded engine
+  skipping `runner.start()` (needed to avoid ITS other side effects) --
+  a bot configured with an MCP server never actually connected to it.
+  Fixed by calling `discover_mcp_tools()` directly, the same standalone
+  function upstream's own startup calls.
 
 ## [0.1.0] - 2026-08-23
 

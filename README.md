@@ -64,10 +64,16 @@ runtime to get there.
 
 - **Tools**: `backend/supervisor_mcp.py` runs as its own MCP server
   (`bot-supervisor`, registered in the bootstrapped `config.yaml`),
-  exposing `list_bots`/`get_bot_status`/`message_bot` so a bot can
-  supervise other bots on the same gateway. New cross-bot capabilities are
+  exposing `list_bots`/`get_bot_status`/`message_bot`/`create_bot`/
+  `delegate_task` so a bot can supervise, message, delegate to, and even
+  create other bots on the same gateway. New cross-bot capabilities are
   new `@mcp.tool()` functions there -- the MCP SDK's own decorator is
   already the registry; nothing extra was needed on top of it.
+  `delegate_task` in particular is fire-and-forget: a bot hands work to
+  another bot without blocking, and the result arrives as a new message
+  in its own session once the worker finishes -- see
+  `docs/design/supervisor-delegation.md` for the design and why it needed
+  its own tool rather than reusing `message_bot`.
 - **Session**: `backend/resilience.py`'s `RESILIENCE_CHECKS` list, as
   described above.
 

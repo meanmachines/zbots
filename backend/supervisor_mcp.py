@@ -26,12 +26,18 @@ container), so no bearer auth/public hostname allowlist needed, unlike
 zorc-mcp's equivalent which sits behind a public Cloudflare Tunnel domain.
 """
 
+import asyncio
+import time
+
 import httpx
 import uvicorn
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
-import persona
+try:
+    from . import persona
+except ImportError:
+    import persona
 
 BOTS_UI_BASE = "http://127.0.0.1:8643"
 
@@ -43,16 +49,19 @@ mcp = MCPServer(
         "creating new ones. Workflow: list_bots() first to see who exists "
         "(free, no LLM call) -> get_bot_status(name) for a real 'what are "
         "you actually doing right now' answer from that bot -> "
-        "message_bot(name, message) to give it an instruction, ask "
-        "something else, or delegate a task. Need a bot that doesn't "
-        "exist yet? Use create_bot -- never try to create one by exploring "
-        "the filesystem or running CLI commands; that bypasses the real "
-        "bot registry, leaves it broken, and takes far longer than this "
-        "one call. get_bot_status() and message_bot() are both real "
-        "conversation turns for the target bot (their reply becomes part "
-        "of its own history), so use them deliberately, not as a cheap "
-        "poll -- list_bots()'s last_message_preview/is_active fields are "
-        "the free option when a rough sense of activity is enough."
+        "message_bot(name, message) for a quick question you're willing "
+        "to wait a few seconds for, or delegate_task(from_bot, to_bot, "
+        "task) for real work, so you stay responsive to the user instead "
+        "of blocking. Need a bot that doesn't exist yet? Use create_bot "
+        "-- never try to create one by exploring the filesystem or "
+        "running CLI commands; that bypasses the real bot registry, "
+        "leaves it broken, and takes far longer than this one call. "
+        "get_bot_status(), message_bot(), and delegate_task() are all "
+        "real conversation turns for the target bot (their reply becomes "
+        "part of its own history), so use them deliberately, not as a "
+        "cheap poll -- list_bots()'s last_message_preview/is_active "
+        "fields are the free option when a rough sense of activity is "
+        "enough."
     ),
 )
 
@@ -148,6 +157,65 @@ async def create_bot(name: str, title: str = "", description: str = "", persona_
         "model": entry.get("model"),
         "provider": entry.get("provider"),
     }
+
+
+# Real design/build tracked in docs/design/supervisor-delegation.md.
+# asyncio.create_task()'s own docs warn that a task with no strong
+# reference held elsewhere can be garbage-collected mid-flight -- this
+# set is that reference, with a done-callback to stop holding it once it
+# finishes (success or failure) so the set doesn't grow forever.
+_background_tasks: set = set()
+
+
+def _fire_and_forget(coro) -> None:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+async def _run_delegated_task(task_id: str, from_bot: str, to_bot: str, task: str) -> None:
+    try:
+        async with httpx.AsyncClient(timeout=300) as client:
+            r = await client.post(f"{BOTS_UI_BASE}/bots/{to_bot}/messages", json={"text": task})
+            r.raise_for_status()
+            result = r.json()["reply"]
+    except Exception as exc:
+        # A failed delegated task still has to reach the supervisor --
+        # otherwise it just vanishes and the user never finds out why the
+        # thing they asked for never happened.
+        result = f"(delegated task failed: {exc})"
+    report = f"[delegated task {task_id} from {to_bot}] {result}"
+    try:
+        async with httpx.AsyncClient(timeout=300) as client:
+            await client.post(f"{BOTS_UI_BASE}/bots/{from_bot}/messages", json={"text": report})
+    except Exception:
+        # Best-effort delivery -- the delegated work itself already ran
+        # and produced a real result; losing the notification is a worse
+        # outcome to compound with a raised exception here, not fix.
+        pass
+
+
+@mcp.tool()
+async def delegate_task(from_bot: str, to_bot: str, task: str) -> dict:
+    """Hand a task off to another bot WITHOUT waiting for it to finish --
+    use this instead of message_bot() for anything that sounds like real
+    work (multi-step research, code changes, long analysis), so you stay
+    responsive to the user instead of blocking for however long to_bot
+    takes. message_bot() is still correct for a quick question you're
+    fine waiting a few seconds for.
+
+    from_bot is YOUR OWN bot name. There's no other way for this tool to
+    know which session to deliver the result back to, so always pass it.
+
+    Returns immediately with a task_id -- to_bot hasn't necessarily
+    finished (or even started) yet. The result arrives as a new incoming
+    message in your own session once to_bot is done; you don't poll or
+    ask again, it'll just be there the next time you're asked to
+    respond, prefixed "[delegated task <task_id> from <to_bot>]".
+    """
+    task_id = f"task-{int(time.time() * 1000)}"
+    _fire_and_forget(_run_delegated_task(task_id, from_bot, to_bot, task))
+    return {"task_id": task_id, "status": "delegated", "to_bot": to_bot}
 
 
 def build_app():

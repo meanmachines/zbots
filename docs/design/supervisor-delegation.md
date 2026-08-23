@@ -1,8 +1,13 @@
 # Design: async task delegation for a supervisor bot
 
-Status: **proposal, not built**. Scoped per the user's direction: design
-first, then build as a side/experimental feature that gets kept only if
-it demonstrably works, not merged into the core chat path speculatively.
+Status: **built** (`supervisor_mcp.py`'s `delegate_task` tool, plus
+`_run_delegated_task`/`_fire_and_forget`), unit-tested
+(`tests/test_supervisor_mcp.py`), verified live end-to-end on
+`zbots-dev`. One real difference from the original design below:
+`delegate_task` takes an explicit `from_bot` parameter rather than
+inferring the caller -- MCP tool calls arrive at this server with no
+caller identity attached, so there's no channel to detect it from; the
+calling bot has to say who it is.
 
 ## The actual goal
 
@@ -35,7 +40,7 @@ the supervisor's own turn blocking on it.
 
 ## Design
 
-### New tool: `delegate_task(bot_name, task)`
+### New tool: `delegate_task(from_bot, to_bot, task)`
 
 Added to `supervisor_mcp.py` alongside the existing three tools, not
 replacing `message_bot()` (that stays -- it's still correct for "ask
