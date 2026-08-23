@@ -6,6 +6,24 @@ tagged on `main`.
 
 ## [Unreleased]
 
+### Fixed
+- `stream_to_bot()`'s rollover forwarded every frame from attempt 1 live,
+  including its own `assistant.completed` -- safe under the OLD frontend
+  (only ever rendered `assistant.delta`), but broke the moment the
+  collapsible-thinking-panel redesign made `assistant.completed` THE
+  answer. Real bug reported live right after that shipped: on any turn
+  needing a rollover (e.g. the stale-model-lock case), the user briefly
+  saw attempt 1's own answer (sometimes a raw rejection) render, then
+  attempt 2's real one replace it right after -- reported as the reply
+  "appearing and disappearing" and the true answer "not showing up"
+  (attempt 1's content was never persisted, so it vanished on the next
+  reload). Fix: progress frames (`tool.*`, `assistant.delta`) still
+  forward live, but anything that could be mistaken for a final answer
+  (`assistant.completed`, `run.completed`, `error`) is held back until
+  the whole attempt is known not to need a retry -- discarded entirely if
+  it does. Pinned with 3 new tests in `test_engine_streaming.py` driving
+  the real async generator against a mocked attempt sequence.
+
 ### Added
 - OpenRouter as a selectable provider in the model switcher (the dropdown
   under a bot's name) and the Models page, alongside every other

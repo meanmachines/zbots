@@ -646,14 +646,16 @@ async def stream_to_bot(
     conversation was actually a fresh, silently-rolled-over session
     underneath, not a continuation of the same one, which is why it was
     never noticed as a visible failure. This is that same rollover
-    protection, adapted for a live stream: since the frontend only acts on
-    assistant.delta events (see app.js's streamBotReply -- run.started/
-    message.started/error/done are already inert to it), attempt 1's
-    setup/error frames can be forwarded live with zero visible effect, and
-    a rolled-over attempt 2 starting immediately after looks identical to
-    one continuous stream. Retried once, matching send_to_bot()'s own
-    single-retry policy -- if attempt 2 also errors, its frames still reach
-    the client (nothing left to fall back to).
+    protection, adapted for a live stream: progress frames (tool.*,
+    assistant.delta) forward live regardless of outcome, but anything that
+    could be mistaken for THE answer (assistant.completed, run.completed,
+    error) is held back until the whole attempt is known not to need a
+    retry -- see _chunks' own comment for the real bug this fixes (attempt
+    1's own completed frame briefly rendering as the reply, then getting
+    replaced by attempt 2's). A rolled-over attempt 2 starting immediately
+    after looks identical to one continuous stream. Retried once, matching
+    send_to_bot()'s own single-retry policy -- if attempt 2 also errors,
+    its frames still reach the client (nothing left to fall back to).
 
     The actual hermes-agent bug (session-lock serialization losing which
     custom endpoint it was) is not fixed here -- fixing that means tracing
@@ -667,16 +669,40 @@ async def stream_to_bot(
     session_id, all_sessions = await _ensure_bot_chat_session(profile, headers, active_session_id)
     state = {"session_id": session_id}
 
+    # Real bug found live, right after the frontend started rendering
+    # assistant.completed as THE answer (see app.js's streamBotReply):
+    # this docstring's own "attempt 1's frames are forwarded live with
+    # zero visible effect" claim stopped being true the moment that
+    # changed. A rolled-over attempt 1 still produces its own real
+    # assistant.completed/run.completed/error frames before the rollover
+    # decision is even made -- forwarding those live means the user
+    # briefly sees attempt 1's (possibly wrong, or a raw stale-model-lock
+    # rejection) answer render, then attempt 2's real one land right after
+    # it, reported live as the reply "appearing and disappearing" and the
+    # true answer "not showing up" (attempt 1's bogus content was never
+    # persisted -- only attempt 2's is -- so it vanishes on the next
+    # reload, exactly the way a phantom frame would). Progress frames
+    # (tool.*, assistant.delta) stay live either way -- the thinking panel
+    # never treats those as an answer, so forwarding them early is still
+    # harmless. Only the frames that could be mistaken for a final answer
+    # are held back until the whole attempt is known not to need a retry.
     async def _chunks():
         saw_error = False
+        pending: list[bytes] = []
         async for frame, was_error in _run_stream_attempt(profile, state["session_id"], message, headers):
-            yield frame
             saw_error = saw_error or was_error
-        if saw_error:
-            new_sid = await _roll_over_bot_session(profile, headers, all_sessions)
-            state["session_id"] = new_sid
-            async for frame, _was_error in _run_stream_attempt(profile, new_sid, message, headers):
+            if frame.startswith((b"event: assistant.completed", b"event: run.completed", b"event: error")):
+                pending.append(frame)
+                continue
+            yield frame
+        if not saw_error:
+            for frame in pending:
                 yield frame
+            return
+        new_sid = await _roll_over_bot_session(profile, headers, all_sessions)
+        state["session_id"] = new_sid
+        async for frame, _was_error in _run_stream_attempt(profile, new_sid, message, headers):
+            yield frame
 
     return state, _chunks()
 

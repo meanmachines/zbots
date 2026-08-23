@@ -9,6 +9,7 @@ checkout -- matches this suite's own sparse-checkout constraint (see
 test_backend.py's provider-collision section for the same pattern).
 """
 
+import asyncio
 import json
 
 from backend import engine
@@ -116,3 +117,91 @@ def test_a_real_completed_reply_is_not_flagged():
     raw = _frame("assistant.completed", {"content": "Sure, happy to help with that.", "completed": True})
     _out, is_stale = engine._process_sse_frame(raw, _fake_sse_frame)
     assert is_stale is False
+
+
+# ---------------------------------------------------------------------------
+# stream_to_bot's own rollover-suppression -- real bug found live, right
+# after the frontend started rendering assistant.completed as THE answer
+# (see app.js's streamBotReply): a rolled-over attempt 1 still produces its
+# own real assistant.completed/run.completed frames before the rollover
+# decision is made. Forwarding those live (the old behavior, safe only
+# because the old frontend ignored everything but assistant.delta) meant a
+# user briefly saw attempt 1's answer render, then attempt 2's real one
+# replace it right after -- reported live as the reply "appearing and
+# disappearing." These drive the real async generator (no vendor engine
+# needed -- _run_stream_attempt is monkeypatched) to pin the fix: progress
+# frames stay live, but assistant.completed/run.completed/error only ever
+# reach the client from whichever attempt actually won.
+# ---------------------------------------------------------------------------
+
+def _fake_attempt(frames):
+    async def _attempt(profile, session_id, message, headers):
+        for frame, was_error in frames:
+            yield frame, was_error
+
+    return _attempt
+
+
+def _drain(monkeypatch, attempts):
+    """attempts: list of frame-lists, one per _run_stream_attempt call (in
+    call order) -- the first is attempt 1, the second (if any) is the
+    rollover retry."""
+    calls = iter(attempts)
+
+    def _next_attempt(profile, session_id, message, headers):
+        return _fake_attempt(next(calls))(profile, session_id, message, headers)
+
+    monkeypatch.setattr(engine, "_run_stream_attempt", _next_attempt)
+    monkeypatch.setattr(engine, "_ensure_bot_chat_session", _fake_ensure_session)
+    monkeypatch.setattr(engine, "_roll_over_bot_session", _fake_roll_over)
+
+    async def _run():
+        _state, chunks = await engine.stream_to_bot("default", "hi", "key", None)
+        return [frame async for frame in chunks]
+
+    return asyncio.run(_run())
+
+
+async def _fake_ensure_session(profile, headers, active_session_id):
+    return "session-1", [{"id": "session-1"}]
+
+
+async def _fake_roll_over(profile, headers, all_sessions):
+    return "session-2"
+
+
+def test_no_rollover_forwards_every_frame_including_the_real_completion(monkeypatch):
+    attempt_1 = [
+        (_frame("tool.started", {"tool_name": "list_bots"}), False),
+        (_frame("assistant.delta", {"delta": "hi"}), False),
+        (_frame("assistant.completed", {"content": "hi"}), False),
+        (_frame("run.completed", {}), False),
+    ]
+    out = _drain(monkeypatch, [attempt_1])
+    assert out == [f for f, _ in attempt_1]
+
+
+def test_rollover_never_forwards_attempt_ones_completion_frames(monkeypatch):
+    attempt_1 = [
+        (_frame("tool.started", {"tool_name": "list_bots"}), False),
+        (_frame("assistant.completed", {"content": "HTTP 400: stale model"}), True),
+        (_frame("run.completed", {}), False),
+    ]
+    attempt_2 = [
+        (_frame("assistant.delta", {"delta": "the real answer"}), False),
+        (_frame("assistant.completed", {"content": "the real answer"}), False),
+        (_frame("run.completed", {}), False),
+    ]
+    out = _drain(monkeypatch, [attempt_1, attempt_2])
+    # Attempt 1's own tool-progress frame is harmless and still forwarded,
+    # but neither of its completion-shaped frames ever reach the client --
+    # only attempt 2's (the one that actually won) do.
+    assert out == [attempt_1[0][0]] + [f for f, _ in attempt_2]
+    assert b"stale model" not in b"".join(out)
+
+
+def test_a_hard_error_with_no_completed_frame_still_suppresses_correctly(monkeypatch):
+    attempt_1 = [(_frame("error", {"message": "boom"}), True)]
+    attempt_2 = [(_frame("assistant.completed", {"content": "recovered"}), False)]
+    out = _drain(monkeypatch, [attempt_1, attempt_2])
+    assert out == [attempt_2[0][0]]
