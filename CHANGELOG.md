@@ -19,16 +19,15 @@ tagged on `main`.
   returns rather than hardcoding a platform list. Verified live end-to-end
   including the real backend's own token-format validation rejecting a
   fake Telegram token with its actual error message.
-  **Known limitation, not fixed here**: the messaging gateway process
-  (`hermes gateway run`) isn't running in this container, so connectors
-  can be configured but won't actually connect yet -- the page says so.
-  Confirmed live that starting it works cleanly (no port conflicts with
-  the existing dashboard/chat processes) but roughly doubles the
-  container's memory footprint (197MB -> 365MB against a 384MB limit,
-  ~95% utilization) -- too tight to enable by default without either a
-  larger memory budget or tighter per-platform resource limits. Left
-  disabled pending that decision rather than silently degrading headroom
-  for the chat feature that's already in daily use.
+- The messaging-platform gateway (`hermes gateway run`) now runs as a
+  fourth in-container process, so a platform configured on the Connectors
+  page above actually connects instead of sitting saved-but-inert (`hermes
+  gateway start` refuses inside Docker and points here instead). Confirmed
+  live it starts cleanly alongside the existing three processes with no
+  port conflicts, but roughly doubles idle memory use (~197MB -> ~365MB
+  with zero platforms enabled) -- too tight against the previous 384MB
+  container limit, so the memory budget was raised to 1024MB before wiring
+  this in rather than after.
 
 ### Corrected
 - An earlier changelog entry claiming external MCP server tools (like

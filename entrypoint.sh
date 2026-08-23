@@ -112,8 +112,23 @@ BACKEND_PID=$!
 (cd /opt/zbots/backend && exec python -m uvicorn supervisor_mcp:app --host 127.0.0.1 --port 8645) &
 SUPERVISOR_PID=$!
 
+# Messaging-platform gateway (Telegram/Discord/WhatsApp/Slack/...) -- the
+# actual connector daemon the Connectors page's real /api/messaging/platforms
+# API expects to be running; without this, a platform can be configured
+# there but never actually connects (confirmed live: the dashboard's own
+# "gateway_running" flag stayed false with only `hermes serve` up). `hermes
+# gateway start` refuses inside Docker and points here instead ("the gateway
+# runs as the container's main process... or run the gateway directly:
+# hermes gateway run") -- confirmed live it starts cleanly alongside the
+# three processes above with no port conflicts. Real cost, not free: this
+# roughly doubles idle memory use (measured ~197MB -> ~365MB with zero
+# platforms enabled), which is why the container's memory budget was raised
+# to 1024MB before adding this rather than after.
+(cd /opt/zbots/backend && exec python3 -m hermes_cli.main gateway run) &
+GATEWAY_PID=$!
+
 # Stop the others if nginx exits so the container signals failure instead
 # of hanging around with a half-dead process tree.
-trap 'kill "$BACKEND_PID" "$DASHBOARD_PID" "$SUPERVISOR_PID" 2>/dev/null || true' EXIT
+trap 'kill "$BACKEND_PID" "$DASHBOARD_PID" "$SUPERVISOR_PID" "$GATEWAY_PID" 2>/dev/null || true' EXIT
 
 nginx -g 'daemon off;'
