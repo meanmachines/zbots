@@ -26,22 +26,35 @@ def test_default_soul_contains_the_branding_safety_guardrail():
     assert persona.BRANDING_SAFETY in persona.DEFAULT_SOUL
 
 
+def test_default_soul_contains_the_response_style_guardrail():
+    assert persona.RESPONSE_STYLE in persona.DEFAULT_SOUL
+
+
 def test_empty_custom_persona_falls_back_to_default_soul():
     assert persona.with_branding_safety("") == persona.DEFAULT_SOUL
     assert persona.with_branding_safety(None) == persona.DEFAULT_SOUL
 
 
-def test_custom_persona_gets_the_guardrail_appended():
+def test_custom_persona_gets_both_guardrails_appended():
     result = persona.with_branding_safety("You are a research specialist who cites sources.")
     assert result.startswith("You are a research specialist who cites sources.")
     assert persona.BRANDING_SAFETY in result
+    assert persona.RESPONSE_STYLE in result
 
 
-def test_guardrail_is_not_duplicated_if_already_present():
-    already_safe = f"You are a coding bot.\n\n{persona.BRANDING_SAFETY}"
+def test_guardrails_are_not_duplicated_if_already_present():
+    already_safe = f"You are a coding bot.\n\n{persona.BRANDING_SAFETY}\n\n{persona.RESPONSE_STYLE}"
     result = persona.with_branding_safety(already_safe)
     assert result == already_safe
     assert result.count(persona.BRANDING_SAFETY) == 1
+    assert result.count(persona.RESPONSE_STYLE) == 1
+
+
+def test_branding_safety_present_but_response_style_missing_only_adds_the_missing_one():
+    partial = f"You are a coding bot.\n\n{persona.BRANDING_SAFETY}"
+    result = persona.with_branding_safety(partial)
+    assert result.count(persona.BRANDING_SAFETY) == 1
+    assert result.count(persona.RESPONSE_STYLE) == 1
 
 
 # ---------------------------------------------------------------------------

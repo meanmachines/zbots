@@ -6,6 +6,39 @@ tagged on `main`.
 
 ## [Unreleased]
 
+### Fixed
+- A new persona guardrail, `RESPONSE_STYLE`, alongside `BRANDING_SAFETY`
+  (both now applied together by `with_branding_safety()`): real bug found
+  live, a blocked or uncertain bot would write its own reasoning process
+  out as the reply itself ("Let me verify whether I can set up a cron
+  job... Let me think about what I can realistically do...") instead of a
+  short status update, and separately stack multi-part clarifying
+  questions into one long paragraph instead of asking the one thing that
+  actually unblocks it. Not a technical reasoning-field leak
+  (`reasoning_echo` defaults off) -- the model's actual visible answer was
+  just written in a narrating-out-loud style. Pushed live to all four
+  existing bots (default, mandy, gg, assistant), not just future ones.
+- Two real bots (`gg`, `assistant`/"Bobby") were found live with their
+  soul's opening line still reading "You are Hermes Agent, an intelligent
+  AI assistant created by Nous Research" -- the exact leak
+  `persona.py`/`redact_branding_leaks` exists to catch in replies, but
+  sitting directly in the system prompt itself (predating this session's
+  branding-safety work, never revisited). `default` and `mandy` were
+  already correct. Fixed by replacing the leaked opening line with the
+  real zBots one on both affected bots' souls, keeping everything else
+  each bot already had.
+- The `bobby-checkin` cron routine (a user-created "every 5 minutes, ask
+  me what I need" job) was confirmed live to actually fire correctly on
+  schedule, but its delivery has failed every time since creation:
+  `bot-chat:assistant` delivery expects a real hermes-agent *profile*
+  named "assistant", but zBots bots are sessions under one shared profile,
+  not separate hermes profiles -- a genuine architecture mismatch between
+  hermes-agent's native cron delivery and zBots' bot model, not something
+  wrong with the job itself. Paused rather than left silently failing
+  every 5 minutes; a real fix needs a zBots-native cron delivery path that
+  resolves a bot name to its session the same way send_to_bot() already
+  does, not hermes' own profile-based delivery.
+
 ### Added
 - A Connectors page (nav: Platform -> Connectors), the same self-service
   pattern as Models/MCP Servers: a thin proxy (`GET/PUT /connectors[/{id}]`,

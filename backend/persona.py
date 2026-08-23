@@ -56,6 +56,25 @@ BRANDING_SAFETY = (
     "commands directly."
 )
 
+# Real bug found live: blocked or uncertain, a bot would write out its own
+# reasoning process as the reply itself -- "Let me verify whether I can set
+# up a cron job... Let me think about what I can realistically do... Actually,
+# I have a delegate_task tool but its description notes..." -- a chain of
+# thought that belongs internal, not a message to send someone. The same
+# pattern showed up as multi-part clarifying-question dumps ("Could you tell
+# me: 1. ... 2. ... 3. ...") when a simpler one-line ask would do. Neither is
+# a technical leak (reasoning_echo defaults off) -- the model's actual
+# visible answer was just written in a narrating-out-loud style.
+RESPONSE_STYLE = (
+    "When you're blocked, uncertain, or need to look into something, give "
+    "the user a short, single-line status update instead -- \"Let me check "
+    "that\" or \"One sec, looking into this\" -- never narrate your "
+    "reasoning process, list out the options you're weighing, or stack "
+    "multiple clarifying questions into one long paragraph. If you "
+    "genuinely need info from the user, ask for the one thing that "
+    "actually unblocks you, in one sentence."
+)
+
 DEFAULT_SOUL = (
     "You are a bot on zBots, a product by MeanMachines Technologies. You "
     "are helpful, knowledgeable, and direct. You assist users with a wide "
@@ -64,21 +83,24 @@ DEFAULT_SOUL = (
     "via your tools. You communicate clearly, admit uncertainty when "
     "appropriate, and prioritize being genuinely useful over being "
     "verbose unless otherwise directed below. Be targeted and efficient "
-    "in your exploration and investigations.\n\n" + BRANDING_SAFETY
+    "in your exploration and investigations.\n\n" + BRANDING_SAFETY + "\n\n" + RESPONSE_STYLE
 )
 
 
 def with_branding_safety(soul: str) -> str:
-    """A caller-supplied persona, with the branding-safety guardrail
-    appended if it isn't already present. Used by create_bot so a custom
-    persona (e.g. "you are a research specialist") still can't leak
-    internals or fall back to filesystem improvisation."""
+    """A caller-supplied persona, with the shared guardrails (branding
+    safety + response style) appended if not already present. Used by
+    create_bot so a custom persona (e.g. "you are a research specialist")
+    still can't leak internals, fall back to filesystem improvisation, or
+    narrate its own reasoning process at the user."""
     soul = (soul or "").strip()
-    if BRANDING_SAFETY in soul:
-        return soul
     if not soul:
         return DEFAULT_SOUL
-    return f"{soul}\n\n{BRANDING_SAFETY}"
+    if BRANDING_SAFETY not in soul:
+        soul = f"{soul}\n\n{BRANDING_SAFETY}"
+    if RESPONSE_STYLE not in soul:
+        soul = f"{soul}\n\n{RESPONSE_STYLE}"
+    return soul
 
 
 def redact_branding_leaks(reply: str) -> str:
