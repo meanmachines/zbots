@@ -598,6 +598,58 @@ input:focus, textarea:focus, select:focus {
 }
 .thinking-step { font-style: normal; }
 
+/* Live preview card -- a bot-generated HTML file rendered inline instead
+   of being a file the user has to already know exists and go find.
+   Real bug found live, two at once: (1) plain .preview-card lost every
+   property that also exists on .msg.bot (max-width/border/padding) --
+   same specificity as a single class, but .msg.bot is TWO classes, so it
+   always won regardless of source order. Compounded onto .msg.preview-card
+   here to actually out-specificity it, matching how .msg.user/.msg.bot
+   already do it themselves rather than relying on cascade order. (2) the
+   card rendered at 0 height with a correctly-sized iframe INSIDE it --
+   overflow: hidden on a flex item (#messages-pane is a column flex
+   container) resolves that item's automatic min-height to 0 per the
+   flexbox spec's own min-size-auto rule, instead of the content height a
+   block layout would give it. flex-shrink: 0 below is the fix -- stop it
+   from participating in flex shrinking at all. */
+.msg.preview-card {
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  overflow: hidden;
+  background: var(--popover);
+  padding: 0;
+  flex-shrink: 0;
+}
+.preview-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.4rem 0.7rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.78rem;
+}
+.preview-card-name {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.preview-card-open {
+  color: var(--primary);
+  text-decoration: none;
+  flex-shrink: 0;
+}
+.preview-card-open:hover { text-decoration: underline; }
+.preview-card-frame {
+  display: block;
+  width: 100%;
+  height: 420px;
+  border: none;
+  background: #fff;
+}
+
 #composer-row {
   padding: 0.9rem 1.25rem;
   display: flex;

@@ -6,6 +6,37 @@ tagged on `main`.
 
 ## [Unreleased]
 
+### Added
+- Inline live preview of a bot-generated HTML file (a landing page, any
+  page it builds) instead of a file the user has to already know exists
+  and go find on the Files page. Tool-agnostic by construction -- scans
+  every tool call's args, and separately the bot's own reply text, for a
+  string that looks like an .html/.htm path, rather than hardcoding one
+  tool name; any tool that touches a file path works automatically, no
+  allowlist to maintain. No new backend plumbing needed -- `GET
+  /files/read` already returns a `data_url` (`data:text/html;base64,...`)
+  for exactly this purpose. Rendered via a sandboxed iframe (`allow-
+  scripts allow-forms`, deliberately no `allow-same-origin`/`allow-
+  popups`/`allow-top-navigation` -- a `data:` URI iframe is already an
+  opaque origin the parent can't be reached from, this is defense in
+  depth against a generated page's own script trying to navigate the tab
+  or spawn windows). Detection runs against the bot's real persisted
+  history (not just the live SSE stream), so a preview survives a poll
+  reload or reopening an older conversation, not just the turn that
+  created it -- confirmed live against a landing page a bot had already
+  built earlier, with zero new messages sent. Cached client-side per path
+  after the first fetch so the 5s poll doesn't re-fetch an unchanged
+  file's base64 content on every tick.
+  - Two real CSS bugs found and fixed getting this to actually render:
+    `.preview-card` (one class) lost every property it shared with
+    `.msg.bot` (two classes, matching specificity beats source order) --
+    fixed by compounding onto `.msg.preview-card` the way `.msg.user`/
+    `.msg.bot` already do it themselves. And `overflow: hidden` on a flex
+    item (`#messages-pane` is a column flex container) resolves that
+    item's automatic min-height to 0 per the flexbox spec's own
+    min-size-auto rule, collapsing the card to zero height around a
+    correctly-sized iframe -- fixed with `flex-shrink: 0`.
+
 ### Fixed
 - `get_bot_messages()` merges every session in a bot's rollover family back
   into one timeline (by design -- so a mid-conversation rollover doesn't
