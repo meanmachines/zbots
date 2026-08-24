@@ -308,9 +308,16 @@ def _schedule_to_string(schedule: Any) -> str:
             return str(schedule["expr"])
         if kind == "interval":
             # parse_schedule stores interval periods as "minutes"; tolerate a
-            # legacy/foreign "seconds" form too.
-            if schedule.get("minutes"):
-                mins = int(schedule["minutes"])
+            # legacy/foreign "seconds" form, and an "hours"/"days" form built
+            # directly rather than through parse_schedule (see
+            # cron/jobs.py's compute_next_run for the real jobs a missing
+            # hours/days case broke there).
+            if schedule.get("minutes") or schedule.get("hours") or schedule.get("days"):
+                mins = (
+                    int(schedule.get("minutes") or 0)
+                    + int(schedule.get("hours") or 0) * 60
+                    + int(schedule.get("days") or 0) * 1440
+                )
                 if mins % 60 == 0:
                     return f"every {mins // 60}h"
                 return f"every {mins}m"

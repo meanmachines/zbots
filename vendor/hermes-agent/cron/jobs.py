@@ -962,9 +962,16 @@ def _schedule_cadence_seconds(schedule: Dict[str, Any]) -> Optional[float]:
         return None
     kind = schedule.get("kind")
     if kind == "interval":
-        minutes = schedule.get("minutes")
+        # Same hours/days tolerance as compute_next_run() -- a schedule dict
+        # built directly (not through parse_schedule()'s minutes-only
+        # normalization) can carry hours/days instead. See that function's
+        # own comment for the real jobs this broke.
+        minutes = schedule.get("minutes") or 0
+        hours = schedule.get("hours") or 0
+        days = schedule.get("days") or 0
         try:
-            return float(minutes) * 60.0 if minutes else None
+            total = (float(minutes) + float(hours) * 60.0 + float(days) * 1440.0) * 60.0
+            return total if total else None
         except (TypeError, ValueError):
             return None
     if kind == "cron":
@@ -1046,18 +1053,37 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
         return _recoverable_oneshot_run_at(schedule, now, last_run_at=last_run_at)
 
     elif kind == "interval":
+        # parse_schedule() always normalizes to a plain "minutes" key, but a
+        # job's schedule dict can also be built directly (e.g. an agent's own
+        # cron-creation tool passing hours/days components rather than a raw
+        # "every X" string), bypassing that normalization. Real bug found
+        # live: two production jobs ("every 10m"/"every 10h" check-ins) were
+        # persisted as {"kind": "interval", "hours": 10} -- reading only
+        # "minutes" here (None) made this return None unconditionally, which
+        # the caller then reports as a generic "recurring schedule couldn't
+        # compute next run, is croniter installed?" error -- a red herring;
+        # croniter is never involved for interval schedules at all. Both
+        # jobs died permanently on their very first tick. Accept whichever
+        # component keys are actually present instead of only "minutes".
         minutes = schedule.get("minutes")
-        if minutes is None:
+        hours = schedule.get("hours")
+        days = schedule.get("days")
+        if minutes is None and hours is None and days is None:
             return None
+        delta = timedelta(
+            minutes=minutes or 0,
+            hours=hours or 0,
+            days=days or 0,
+        )
         if last_run_at:
             try:
                 last = _ensure_aware(datetime.fromisoformat(last_run_at))
-                next_run = last + timedelta(minutes=minutes)
+                next_run = last + delta
             except Exception:
-                next_run = now + timedelta(minutes=minutes)
+                next_run = now + delta
         else:
             # First run is now + interval
-            next_run = now + timedelta(minutes=minutes)
+            next_run = now + delta
         return next_run.isoformat()
 
     elif kind == "cron":

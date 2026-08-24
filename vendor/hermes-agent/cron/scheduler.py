@@ -822,8 +822,15 @@ def _job_interval_minutes(job: dict) -> Optional[float]:
         if isinstance(schedule, dict):
             kind = schedule.get("kind")
             if kind == "interval":
-                minutes = schedule.get("minutes")
-                return float(minutes) if minutes else None
+                # A schedule dict built directly (not through
+                # parse_schedule()'s minutes-only normalization) can carry
+                # hours/days instead -- see cron/jobs.py's compute_next_run
+                # for the real jobs this broke when only "minutes" was read.
+                minutes = schedule.get("minutes") or 0
+                hours = schedule.get("hours") or 0
+                days = schedule.get("days") or 0
+                total = float(minutes) + float(hours) * 60.0 + float(days) * 1440.0
+                return total if total else None
             if kind == "cron":
                 return _cron_interval_minutes(str(schedule.get("expr") or ""))
     except Exception:
