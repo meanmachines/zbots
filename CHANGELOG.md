@@ -7,6 +7,20 @@ tagged on `main`.
 ## [Unreleased]
 
 ### Fixed
+- The card flicker came back right after the previous revert ("cards are
+  still flickering") because the revert only undid one attempted fix, not
+  the actual root cause: `loadMessages` unconditionally wiped and rebuilt
+  the entire pane on every 5-second poll regardless of whether the server
+  response had changed at all. Messages never visibly flickered from this
+  because their rebuild is synchronous (one paint, no gap); preview cards
+  did, because they're reinserted through an async step, so even a totally
+  no-op poll opened a real window with zero cards on screen. Fixed at the
+  actual source instead of tuning the async step again: `loadMessages` now
+  compares the raw fetched rows against what's already rendered and skips
+  calling `renderMessages` entirely when nothing changed. Confirmed live
+  with a `MutationObserver` on the messages pane plus 50ms-interval card
+  sampling across three-plus full poll cycles (18s): zero DOM mutations
+  observed, card count locked at a constant value the entire time.
 - The synchronous cache-hit fast path for preview cards (`buildPreviewCardSync`)
   made the flicker worse instead of fixing it -- reported live right after
   shipping ("flickering is even worse"). Reverted outright rather than
