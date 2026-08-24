@@ -7,6 +7,17 @@ tagged on `main`.
 ## [Unreleased]
 
 ### Fixed
+- `/bots/` (the whole static frontend -- app.js, styles.css, etc.) had no
+  Cache-Control header at all, leaving every browser to its own
+  heuristic caching. Real confusion this caused live: a fix would ship
+  and be directly verified working against the server, then get reported
+  right back as still broken -- the browser was still serving whatever
+  copy it had fetched before, with no indication anything was stale.
+  Added `Cache-Control: no-cache` (not `no-store` -- the browser still
+  keeps its copy, but must revalidate with the server first every time,
+  via the ETag/Last-Modified nginx already sends). An unchanged file is
+  still a fast 304; a changed one is now picked up immediately on the
+  next load instead of requiring a manual hard-refresh.
 - Still-present periodic flicker reported live right after the previous
   round of flicker fixes shipped ("chat is still refreshing all the
   time") -- the preview cache's TTL (15s, raised from an even-worse 4s
