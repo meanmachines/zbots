@@ -6,6 +6,23 @@ tagged on `main`.
 
 ## [Unreleased]
 
+### Fixed
+- Still-present periodic flicker reported live right after the previous
+  round of flicker fixes shipped ("chat is still refreshing all the
+  time") -- the preview cache's TTL (15s, raised from an even-worse 4s
+  earlier the same day) still landed a real network re-fetch right at
+  its own expiry boundary on whichever poll happened to land after it,
+  visible as cards vanishing and reappearing roughly every 15 seconds.
+  No finite TTL was ever going to fully fix this -- it can only trade
+  flicker frequency for flicker frequency. Reverted to a permanent
+  session cache; the real fix for staleness is the RESPONSE_STYLE
+  guardrail already shipped (bots save a revision under a new filename
+  instead of overwriting), which sidesteps the cache-invalidation
+  question entirely by giving a genuinely different version a genuinely
+  different, never-cached path. Confirmed live: message count in the
+  pane held at a constant 44 across a full 35-second observation window,
+  not a single dip.
+
 ### Added
 - Bare URLs in chat now render as real clickable links -- the markdown
   renderer previously only linkified `[label](url)` syntax, so a bot

@@ -10,41 +10,42 @@ let rosterPollTimer = null;
 let messagesPollTimer = null;
 let lastRenderedCount = -1; // -1 means "next render is a fresh thread open, don't animate"
 
-// path -> {fileInfo, fetchedAt} (fileInfo null for "checked, not a
-// previewable file") -- renderMessages re-scans and re-appends preview
-// cards on every poll (rows are rebuilt from scratch each time, same as
-// everything else in this pane), so without this cache a file that's
-// still there five messages later would get re-fetched over the wire
-// every 5s for no reason.
+// path -> fileInfo (or null for "checked, not a previewable file") --
+// renderMessages re-scans and re-appends preview cards on every poll
+// (rows are rebuilt from scratch each time, same as everything else in
+// this pane), so without this cache a file that's still there five
+// messages later would get re-fetched over the wire every 5s for no
+// reason.
 //
-// Short-lived, NOT session-permanent -- real bug found live: a bot asked
-// to iterate ("change the color to purple") overwrites the SAME path
-// with new content, but a cache that never expires kept serving the
-// FIRST version ever fetched forever, so the preview looked like nothing
-// had changed no matter how many times the file was regenerated.
-//
-// Deliberately longer than the 5s poll interval (see messagesPollTimer)
-// -- a second real bug found live, right after the TTL above shipped at
-// 4000ms: every single poll landed just past expiry, so EVERY card had
-// to re-fetch over the real network on EVERY poll, and the base message
-// list (instant, synchronous) rendered a beat before the cards caught
-// back up -- visible as cards vanishing and reappearing every 5 seconds,
-// a smaller version of the same "constantly coming and going" complaint
-// this whole cache was supposed to fix. Comfortably above one poll
-// period means a normal poll almost always hits cache (near-instant,
-// same paint frame, no visible gap at all) while a genuinely regenerated
-// file still surfaces within one TTL window, not indefinitely.
-const PREVIEW_CACHE_TTL_MS = 15000;
+// Session-permanent, deliberately -- this went through TWO real bugs
+// before landing here, both found live. First: a plain permanent cache
+// meant a bot overwriting the SAME path with new content ("change the
+// color to purple") kept showing whatever was fetched the FIRST time,
+// forever. Tried fixing that with a short TTL (4s) instead -- but every
+// poll (5s, unconditional) then landed just past expiry, forcing a real
+// network re-fetch for every card on every single poll; the instantly-
+// rendered base message list beat the cards back into view by a beat,
+// visible as cards vanishing and reappearing every 5 seconds. Widening
+// the TTL to 15s only pushed the same gap out to once every 15s instead
+// of removing it -- still a periodic flicker, just slower, and still
+// reported live as "chat is still refreshing all the time." The actual
+// fix for staleness isn't a client-side cache heuristic at all -- it's
+// the RESPONSE_STYLE guardrail in persona.py that has bots save a
+// revision under a NEW filename instead of overwriting, so a genuinely
+// different version gets a genuinely different (never-cached) path in
+// the first place. This cache goes back to being permanent for a
+// session on that basis -- no periodic re-fetch, no periodic flicker,
+// and the rare case of a bot still overwriting despite the instruction
+// means a hard refresh picks up the change, not a silent forever-stale
+// preview.
 let previewCache = new Map();
 
 function getCachedPreview(path) {
-  const entry = previewCache.get(path);
-  if (!entry || Date.now() - entry.fetchedAt > PREVIEW_CACHE_TTL_MS) return undefined;
-  return entry.fileInfo;
+  return previewCache.has(path) ? previewCache.get(path) : undefined;
 }
 
 function setCachedPreview(path, fileInfo) {
-  previewCache.set(path, { fileInfo, fetchedAt: Date.now() });
+  previewCache.set(path, fileInfo);
 }
 
 // Keyed by "kind:id" so a reply in flight for one bot/group doesn't lock
