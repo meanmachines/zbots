@@ -7,23 +7,6 @@ tagged on `main`.
 ## [Unreleased]
 
 ### Fixed
-- Preview cards specifically still flickered on every poll even after
-  chat messages themselves went rock-stable -- reported live as "chat
-  messages are stable, but the file cards are still flickering," an
-  accurate, narrower symptom than earlier reports. Root cause: even a
-  pure cache hit (zero network calls) still went through `buildPreviewCard`,
-  an `async function` -- awaiting one of those per card, several cards in
-  a row, was enough for the browser to paint the gap between the pane
-  being wiped and the cards being reinserted, on every single poll,
-  regardless of caching. Fixed with a genuinely synchronous fast path
-  (`buildPreviewCardSync`) that builds a card immediately with no
-  Promise/await at all when its data is already cached, running inline in
-  the same synchronous pass as the rest of `renderMessages`; only a path
-  that's never been seen before still falls through to the async fetch
-  path, where a one-time "pops in a moment later" is real and expected,
-  not a bug. Confirmed live: once a conversation's previews are cached,
-  switching away and back shows all cards appearing in a single step (0
-  -> 9), not a gradual climb (0 -> 6 -> 7 -> 8 -> 8) the way it did before.
 - `/bots/` (the whole static frontend -- app.js, styles.css, etc.) had no
   Cache-Control header at all, leaving every browser to its own
   heuristic caching. Real confusion this caused live: a fix would ship
