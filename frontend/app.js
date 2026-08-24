@@ -749,12 +749,43 @@ function renderMessages(rows, kind, previewPaths) {
     lastRenderedCount = 0;
     return;
   }
-  // Anchor nodes recorded as each row is built, so preview cards can be
-  // positioned afterward via insertBefore against a stable reference
-  // instead of relying on "whatever the pane's last child happens to be"
-  // (only safe when nothing else can insert in between, which async
-  // fetches can no longer guarantee here).
+  // Anchor nodes recorded as each row (and each synchronously-inserted
+  // card) is built, so preview cards still pending after this function
+  // returns can be positioned via insertBefore against a stable
+  // reference instead of relying on "whatever the pane's last child
+  // happens to be" (only safe when nothing else can insert in between,
+  // which an async fetch can't guarantee).
   const anchors = []; // {node, ts}
+
+  // previewPaths is a Map<path, timestamp>, oldest first once sorted --
+  // each is inserted (synchronously, if cached -- see below) right after
+  // the message it chronologically belongs after, instead of every card
+  // landing in one batch at the very end regardless of when the file was
+  // actually generated.
+  const pending = previewPaths ? Array.from(previewPaths.entries()).sort((a, b) => a[1] - b[1]) : [];
+  let pendingIdx = 0;
+  // Paths that AREN'T cached yet -- these still need a real fetch, so
+  // they're deferred to insertPreviewCardsAsync after this function
+  // returns (see its own comment for why that has to stay async).
+  // Everything else is built and inserted right here, synchronously.
+  const asyncPending = [];
+
+  function flushSyncUpTo(ts) {
+    while (pendingIdx < pending.length && pending[pendingIdx][1] <= ts) {
+      const [path, pathTs] = pending[pendingIdx];
+      pendingIdx++;
+      const card = buildPreviewCardSync(path);
+      if (card === undefined) {
+        asyncPending.push([path, pathTs]); // not cached yet
+      } else if (card) {
+        // card === null means "already checked, not a real previewable
+        // file" -- correctly produces no card at all, not an empty slot.
+        pane.appendChild(card);
+        anchors.push({ node: card, ts: pathTs });
+      }
+    }
+  }
+
   let lastDayKey = null;
   rows.forEach((row, i) => {
     const ts = messageTimestamp(row);
@@ -808,27 +839,35 @@ function renderMessages(rows, kind, previewPaths) {
     if (i >= animateFrom) div.classList.add("msg-pop");
     pane.appendChild(div);
     anchors.push({ node: div, ts: ts || 0 });
+    if (ts) flushSyncUpTo(ts);
   });
+  // Anything left with no timestamp to compare against, or newer than
+  // every rendered message (e.g. a file from the turn that's still
+  // streaming), still gets a chance to flush synchronously if cached.
+  flushSyncUpTo(Infinity);
   lastRenderedCount = rows.length;
   pane.scrollTop = pane.scrollHeight;
 
-  // The only async part left, deliberately decoupled from everything
-  // above -- guarded by myGeneration so a render superseded by a newer
-  // poll before this finishes fetching can never insert into (or scroll)
-  // a pane it no longer owns.
-  if (previewPaths && previewPaths.size) {
-    insertPreviewCardsAsync(pane, anchors, previewPaths, myGeneration);
+  // Only genuinely uncached paths reach this point -- guarded by
+  // myGeneration so a render superseded by a newer poll before this
+  // finishes fetching can never insert into (or scroll) a pane it no
+  // longer owns. Deliberately the ONLY async part left: a real network
+  // fetch cannot be made synchronous, but nothing above this line needs
+  // one anymore, which is what actually stops a poll from ever painting
+  // a "cards missing" gap for a path it has already seen before.
+  if (asyncPending.length) {
+    insertPreviewCardsAsync(pane, anchors, asyncPending, myGeneration);
   }
 }
 
-// previewPaths is a Map<path, timestamp> -- processed oldest first so
-// each card is positioned right after the anchor (a rendered message, or
-// a previously-inserted card) it chronologically belongs after, instead
-// of every card landing in one batch at the very end regardless of when
-// the file was actually generated. Real bug found live: a file generated
-// early in a long conversation rendered BELOW messages sent long after
-// it -- newest-message-last (the one thing a chat pane must always get
-// right) was broken.
+// pending is an array of [path, timestamp] pairs the caller has ALREADY
+// confirmed aren't in the cache (see renderMessages' own flushSyncUpTo --
+// anything cached is built and inserted synchronously and never reaches
+// here at all), already in ascending timestamp order, so each is
+// positioned right after the anchor (a rendered message, or a
+// previously-inserted card) it chronologically belongs after -- same
+// "not always at the very end" fix as the synchronous path, just for
+// the paths that genuinely need a real fetch first.
 //
 // Deliberately fire-and-forget from renderMessages' point of view (not
 // awaited there) -- this can take a real network round trip per
@@ -838,8 +877,7 @@ function renderMessages(rows, kind, previewPaths) {
 // newer render has started in the meantime, this generation is stale and
 // silently stops touching a pane it no longer owns, rather than
 // inserting into (or scrolling) whatever the pane has since become.
-async function insertPreviewCardsAsync(pane, anchors, previewPaths, myGeneration) {
-  const pending = Array.from(previewPaths.entries()).sort((a, b) => a[1] - b[1]);
+async function insertPreviewCardsAsync(pane, anchors, pending, myGeneration) {
   for (const [path, ts] of pending) {
     const card = await buildPreviewCard(path);
     if (renderGeneration !== myGeneration) return; // superseded -- stop here
@@ -1196,21 +1234,13 @@ document.getElementById("preview-close-btn").addEventListener("click", () => {
   releaseCurrentPreviewBlobUrl();
 });
 
-// Fetches + builds a preview card element without inserting it anywhere
-// -- the caller decides where it goes (appended live during streaming,
-// or positioned chronologically among history, see
-// insertPreviewCardsAsync). Returns null for a path that turned out not
-// to be a real previewable file (a regex guess that didn't pan out).
-async function buildPreviewCard(path) {
-  let fileInfo = getCachedPreview(path);
-  if (fileInfo === undefined) {
-    try {
-      fileInfo = await apiGet(`/files/read?path=${encodeURIComponent(path)}`);
-    } catch (_) {
-      fileInfo = null; // the path was a guess (matched by regex, not confirmed) -- cache the miss too
-    }
-    setCachedPreview(path, fileInfo);
-  }
+// Pure and synchronous -- takes an already-resolved fileInfo and returns
+// a card element, or null if it turned out not to be a real previewable
+// file (a regex guess that didn't pan out). Shared by both the
+// synchronous cache-hit path (buildPreviewCardSync) and the async
+// fetch-then-build path (buildPreviewCard) below, so there's exactly one
+// place that defines what a card looks like.
+function buildCardElementFromFileInfo(fileInfo, path) {
   const mimeType = fileInfo && fileInfo.mime_type;
   const isPreviewable = mimeType && (mimeType.startsWith("text/html") || mimeType.startsWith("image/"));
   if (!fileInfo || !fileInfo.data_url || !isPreviewable) return null;
@@ -1237,6 +1267,50 @@ async function buildPreviewCard(path) {
   header.appendChild(hint);
   card.appendChild(header);
   return card;
+}
+
+// Synchronous cache-hit fast path -- returns a built card immediately
+// (no Promise, no await, nothing) if this path has already been
+// fetched, or undefined if it hasn't (caller falls back to the async
+// buildPreviewCard below). Real bug found live, right after the preview
+// cache went back to being permanent: even a "free" cache hit still had
+// to go through an async function, and awaiting several of those in a
+// row -- one per card -- was enough for the browser to paint the gap in
+// between wipe-and-reinsert on every single poll, regardless of whether
+// any network fetch actually happened. Reported live as "chat messages
+// are stable, but the file cards are still flickering" -- an accurate,
+// narrower description than the earlier "everything flickers" reports,
+// and the real remaining clue: the base render was already fixed
+// (synchronous), but EVERY card insertion, even a pure cache hit, was
+// still forced through an await boundary. This function exists so the
+// common case (a path already seen this session) never crosses that
+// boundary at all -- it runs inline in the same synchronous pass as the
+// rest of renderMessages, so the browser has nothing to paint in
+// between. Only a genuinely new, never-before-seen path still goes
+// through the async path (see insertPreviewCardsAsync), where a
+// one-time "pops in a moment later" is real and expected, not a bug.
+function buildPreviewCardSync(path) {
+  const fileInfo = getCachedPreview(path);
+  if (fileInfo === undefined) return undefined; // not cached -- caller must go async
+  return buildCardElementFromFileInfo(fileInfo, path);
+}
+
+// Fetches + builds a preview card element without inserting it anywhere
+// -- the caller decides where it goes (appended live during streaming,
+// or positioned chronologically among history, see
+// insertPreviewCardsAsync). Returns null for a path that turned out not
+// to be a real previewable file (a regex guess that didn't pan out).
+async function buildPreviewCard(path) {
+  let fileInfo = getCachedPreview(path);
+  if (fileInfo === undefined) {
+    try {
+      fileInfo = await apiGet(`/files/read?path=${encodeURIComponent(path)}`);
+    } catch (_) {
+      fileInfo = null; // the path was a guess (matched by regex, not confirmed) -- cache the miss too
+    }
+    setCachedPreview(path, fileInfo);
+  }
+  return buildCardElementFromFileInfo(fileInfo, path);
 }
 
 // Live-streaming use only (see streamBotReply) -- one turn's own cards,
