@@ -950,6 +950,24 @@ details.advanced summary { cursor: pointer; font-size: 0.82rem; color: var(--tex
   color: var(--text-muted);
 }
 .msg-body a { color: var(--primary); }
+/* OAuth/consent-flow links (Gmail, LinkedIn, etc.) get a distinct button
+   instead of blending into a wall of setup prose as one more inline link
+   -- the one link that actually matters is the one the user needs to
+   click, not something to spot in a paragraph. */
+.msg-body a.connect-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--primary-fg);
+  background: var(--primary);
+  padding: 0.45rem 0.9rem;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 0.85rem;
+  text-decoration: none;
+  margin: 0.3rem 0;
+}
+.msg-body a.connect-btn:hover { filter: brightness(1.08); }
 .msg-body code {
   background: var(--card);
   border: 1px solid var(--border);

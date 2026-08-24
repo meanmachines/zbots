@@ -15,6 +15,61 @@ function mdEscape(s) {
     .replace(/'/g, "&#39;");
 }
 
+// Real gap found live: a bot walking someone through an OAuth setup (or
+// any "here's a link" moment) writes the bare URL as plain text, not
+// markdown link syntax -- this renderer only ever linkified
+// [label](url), so that URL rendered as dead, unstyled text the user
+// couldn't click at all, only select-and-copy-paste. Matches a bare
+// http(s) URL not already wrapped in [label](url) (that conversion runs
+// first, in mdInline, and protects its own output before this ever
+// sees the text). Trailing punctuation likely belonging to the
+// SENTENCE, not the URL (a period ending the sentence, a comma before
+// "and", a closing paren that was never opened) is peeled off after
+// matching, same as most chat apps' own autolinkers do.
+const BARE_URL_RE = /https?:\/\/[^\s<>"')\]]+/g;
+const URL_TRAILING_PUNCT_RE = /[.,;:!?]+$/;
+
+// OAuth/consent-flow links get a distinct "Connect" button instead of
+// blending in as one more inline link -- real feedback live: walking
+// someone through connecting Gmail/Calendar buries the one link that
+// actually matters (the real authorization URL) in a wall of setup
+// prose, when it's the single most important thing to click. Matched
+// by the actual OAuth AUTHORIZATION endpoint host, not by guessing at
+// path keywords -- these are the real, stable authorize endpoints every
+// OAuth 2.0 provider exposes, confirmed against hermes-agent's own
+// google-workspace skill (the mechanism that generates these links
+// today).
+const OAUTH_LINK_RE = /^https:\/\/(accounts\.google\.com\/o\/oauth2|www\.linkedin\.com\/oauth|login\.microsoftonline\.com\/[^/]+\/oauth2|slack\.com\/oauth|github\.com\/login\/oauth\/authorize)\b/i;
+
+// url arrives already HTML-escaped -- both callers (the markdown-link
+// regex and linkifyBareUrls) run on `out` AFTER mdInline's own leading
+// mdEscape(text) pass, so it's already safe to drop into an attribute
+// as-is. Real bug found live, pre-existing before this file even grew a
+// bare-URL pass: escaping it again here double-encoded any query-string
+// "&" into "&amp;amp;" -- which a real OAuth authorize URL (the one
+// case this file most needs to get right) almost always has.
+function linkHtml(url, label) {
+  if (OAUTH_LINK_RE.test(url)) {
+    return `<a class="connect-btn" href="${url}" target="_blank" rel="noopener noreferrer">${icon("connectors", 14)}<span>Connect</span></a>`;
+  }
+  return `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+}
+
+// Runs over the STRING (not the DOM) after markdown-syntax links have
+// already been protected as placeholders, so a bare URL match can never
+// land inside an href already produced, and this can never re-process
+// a URL that was already part of [label](url).
+function linkifyBareUrls(text, linkSpans) {
+  return text.replace(BARE_URL_RE, (m) => {
+    const trailingMatch = m.match(URL_TRAILING_PUNCT_RE);
+    const trailing = trailingMatch ? trailingMatch[0] : "";
+    const url = trailing ? m.slice(0, -trailing.length) : m;
+    if (!url) return m;
+    linkSpans.push(linkHtml(url, url));
+    return `\u0001${linkSpans.length - 1}\u0001${trailing}`;
+  });
+}
+
 function mdInline(text) {
   let out = mdEscape(text);
 
@@ -25,16 +80,24 @@ function mdInline(text) {
     return `\u0000${codeSpans.length - 1}\u0000`;
   });
 
-  // Links -- only http(s), opened in a new tab with no referrer.
+  // Links -- only http(s), opened in a new tab with no referrer. Both
+  // markdown-syntax links and bare URLs (see linkifyBareUrls below) are
+  // protected behind the same NUL-fence placeholder scheme as code
+  // spans, so the bare-URL pass can never land inside an href this pass
+  // already produced.
+  const linkSpans = [];
   out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (_, label, url) => {
-    return `<a href="${mdEscape(url)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+    linkSpans.push(linkHtml(url, label));
+    return `\u0001${linkSpans.length - 1}\u0001`;
   });
+  out = linkifyBareUrls(out, linkSpans);
 
   out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   out = out.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
   out = out.replace(/~~([^~]+)~~/g, "<del>$1</del>");
 
   out = out.replace(/\u0000(\d+)\u0000/g, (_, idx) => `<code>${codeSpans[Number(idx)]}</code>`);
+  out = out.replace(/\u0001(\d+)\u0001/g, (_, idx) => linkSpans[Number(idx)]);
   return out;
 }
 

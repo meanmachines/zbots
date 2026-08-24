@@ -6,6 +6,29 @@ tagged on `main`.
 
 ## [Unreleased]
 
+### Added
+- Bare URLs in chat now render as real clickable links -- the markdown
+  renderer previously only linkified `[label](url)` syntax, so a bot
+  just typing a plain `https://...` URL (very common mid-setup-flow,
+  e.g. "here's the auth link: https://...") rendered as dead, unstyled
+  text the user could only select and copy, not click.
+- OAuth/consent-flow authorization links (Google, LinkedIn, Microsoft,
+  Slack, GitHub) render as a distinct "Connect" button instead of
+  blending into the setup prose as one more inline link -- the one link
+  that actually matters is the one the user needs to click. Matched by
+  the real, stable OAuth authorization endpoint host (confirmed against
+  hermes-agent's own google-workspace skill, the mechanism that
+  generates these links today), not by guessing at path keywords.
+  - Fixed a real, pre-existing double-escaping bug found getting this
+    right: a link's URL is already HTML-escaped by the time it reaches
+    the code building its `href` (mdInline's own leading `mdEscape(text)`
+    pass runs first), so escaping it again turned a query string's `&`
+    into `&amp;amp;` -- which a real OAuth authorize URL (exactly the
+    case this feature most needs to work) almost always has. Existed for
+    `[label](url)` links too, just never noticed since it silently
+    produced a still-technically-clickable (if cosmetically broken) link
+    rather than an obviously wrong one.
+
 ### Fixed
 - Real regression found live, right after the chronological preview-card
   ordering fix below shipped: making `renderMessages` interleave awaited
