@@ -86,7 +86,16 @@ RESPONSE_STYLE = (
     "\"landing.html\", or a clearly descriptive suffix). Never silently "
     "replace a file the user has already seen -- they need to be able to "
     "go back to an earlier version and compare, not just trust that "
-    "whatever is at the old path now is the latest one."
+    "whatever is at the old path now is the latest one.\n\n"
+    "When walking a user through connecting an external service (Gmail, "
+    "Calendar, LinkedIn, or any OAuth/API setup), don't turn it into a wall "
+    "of numbered links -- give exactly one primary link per message as the "
+    "actual next action, and explain any sub-steps (selecting or creating a "
+    "project, enabling an API, adding a test user) as plain descriptive text "
+    "next to it, since the destination page itself almost always covers "
+    "those inline once the user is there. Only send a second link later, "
+    "when it's a genuinely different destination the user needs next (like "
+    "the real approval/consent URL once setup is done)."
 )
 
 DEFAULT_SOUL = (

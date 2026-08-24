@@ -7,6 +7,27 @@ tagged on `main`.
 ## [Unreleased]
 
 ### Fixed
+- The synchronous cache-hit fast path for preview cards (`buildPreviewCardSync`)
+  made the flicker worse instead of fixing it -- reported live right after
+  shipping ("flickering is even worse"). Reverted outright rather than
+  attempting a second patch on top of an approach that had just been
+  contradicted by direct user observation; the permanent-cache/async
+  `buildPreviewCard` path from the previous fix is back in place and
+  confirmed stable again (message and card counts held constant across a
+  full 20-second window post-revert).
+- The Google Calendar/Gmail connect flow was dumping five separate
+  clickable links into one message (project selector, API library, OAuth
+  client creation, test-user audience page, credentials download) when
+  reported live only the last was actually needed to act on -- Google's
+  own console pages already let you select/create a project and enable
+  an API inline from the credentials screen itself, so the earlier links
+  were redundant clicks, not separate required destinations. Added a
+  RESPONSE_STYLE guardrail (`persona.py`) so any bot walking a user
+  through an external OAuth/API setup gives exactly one primary link per
+  message and explains sub-steps as plain text next to it, saving a
+  second link only for a genuinely different later destination (the
+  real approval/consent URL once setup is done). Patched live onto the
+  `default` bot's soul and confirmed via `GET /bots/default/soul`.
 - `/bots/` (the whole static frontend -- app.js, styles.css, etc.) had no
   Cache-Control header at all, leaving every browser to its own
   heuristic caching. Real confusion this caused live: a fix would ship

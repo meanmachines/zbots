@@ -9,6 +9,17 @@ let selected = null; // {kind: "bot"|"group", id: string}
 let rosterPollTimer = null;
 let messagesPollTimer = null;
 let lastRenderedCount = -1; // -1 means "next render is a fresh thread open, don't animate"
+// Raw row payload (JSON) behind the last actual render, so a poll whose
+// server response is byte-identical to what's already on screen can skip
+// renderMessages entirely instead of unconditionally wiping and rebuilding
+// the whole pane every 5s regardless of whether anything changed. That
+// unconditional rebuild -- not any particular card-insertion timing -- was
+// the real source of the preview-card flicker: messages get rewritten
+// synchronously (one paint, no visible gap), but cards go back in through
+// an async step, so every no-op poll still opened a real window where the
+// pane briefly had zero cards. Reported live as "cards are still
+// flickering" even after two rounds of tuning that async step itself.
+let lastMessagesSignature = null;
 
 // path -> fileInfo (or null for "checked, not a previewable file") --
 // renderMessages re-scans and re-appends preview cards on every poll
@@ -688,6 +699,7 @@ document.addEventListener("click", (e) => {
 async function selectBot(name) {
   selected = { kind: "bot", id: name };
   lastRenderedCount = -1;
+  lastMessagesSignature = null;
   document.body.classList.add("chat-open");
   document.getElementById("routines-pane").classList.remove("open");
   const entry = roster.find((r) => r.name === name);
@@ -1431,6 +1443,15 @@ async function loadMessages(fromPoll = false) {
   try {
     if (selected.kind === "bot") {
       const rows = await apiGet(`/bots/${selected.id}/messages`);
+      // A poll whose response is byte-identical to what's already on
+      // screen has nothing to do -- skip the render entirely rather than
+      // wiping and rebuilding a pane that would come out looking exactly
+      // the same. lastRenderedCount === -1 (fresh thread open) always
+      // renders regardless, since there's nothing on screen yet to compare
+      // against.
+      const sig = JSON.stringify(rows);
+      if (lastRenderedCount !== -1 && sig === lastMessagesSignature) return;
+      lastMessagesSignature = sig;
       // Scanned from the UNFILTERED rows -- "tool" rows carry the actual
       // call/result content a preview path lives in, and get dropped by
       // the very next line's filter (collapseToFinalTurns never sees them
@@ -1440,6 +1461,9 @@ async function loadMessages(fromPoll = false) {
       renderMessages(chatRows, "bot", previewPaths);
     } else {
       const rows = await apiGet(`/groups/${selected.id}/messages`);
+      const sig = JSON.stringify(rows);
+      if (lastRenderedCount !== -1 && sig === lastMessagesSignature) return;
+      lastMessagesSignature = sig;
       renderMessages(rows || [], "group");
     }
   } catch (e) {
@@ -1601,6 +1625,7 @@ async function refreshGroups() {
 async function selectGroup(id) {
   selected = { kind: "group", id };
   lastRenderedCount = -1;
+  lastMessagesSignature = null;
   document.body.classList.add("chat-open");
   document.getElementById("routines-pane").classList.remove("open");
   const group = groups.find((g) => g.id === id);
