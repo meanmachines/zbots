@@ -10,14 +10,42 @@ let rosterPollTimer = null;
 let messagesPollTimer = null;
 let lastRenderedCount = -1; // -1 means "next render is a fresh thread open, don't animate"
 
-// path -> fileInfo (or null for "checked, not a previewable file") --
-// renderMessages re-scans and re-appends preview cards on every poll (rows
-// are rebuilt from scratch each time, same as everything else in this
-// pane), so without this cache a file that's still there five messages
-// later would get re-fetched over the wire every 5s for no reason.
-// Session-lifetime only, never expired -- a file a bot already built
-// doesn't change out from under a stable path.
+// path -> {fileInfo, fetchedAt} (fileInfo null for "checked, not a
+// previewable file") -- renderMessages re-scans and re-appends preview
+// cards on every poll (rows are rebuilt from scratch each time, same as
+// everything else in this pane), so without this cache a file that's
+// still there five messages later would get re-fetched over the wire
+// every 5s for no reason.
+//
+// Short-lived, NOT session-permanent -- real bug found live: a bot asked
+// to iterate ("change the color to purple") overwrites the SAME path
+// with new content, but a cache that never expires kept serving the
+// FIRST version ever fetched forever, so the preview looked like nothing
+// had changed no matter how many times the file was regenerated.
+//
+// Deliberately longer than the 5s poll interval (see messagesPollTimer)
+// -- a second real bug found live, right after the TTL above shipped at
+// 4000ms: every single poll landed just past expiry, so EVERY card had
+// to re-fetch over the real network on EVERY poll, and the base message
+// list (instant, synchronous) rendered a beat before the cards caught
+// back up -- visible as cards vanishing and reappearing every 5 seconds,
+// a smaller version of the same "constantly coming and going" complaint
+// this whole cache was supposed to fix. Comfortably above one poll
+// period means a normal poll almost always hits cache (near-instant,
+// same paint frame, no visible gap at all) while a genuinely regenerated
+// file still surfaces within one TTL window, not indefinitely.
+const PREVIEW_CACHE_TTL_MS = 15000;
 let previewCache = new Map();
+
+function getCachedPreview(path) {
+  const entry = previewCache.get(path);
+  if (!entry || Date.now() - entry.fetchedAt > PREVIEW_CACHE_TTL_MS) return undefined;
+  return entry.fileInfo;
+}
+
+function setCachedPreview(path, fileInfo) {
+  previewCache.set(path, { fileInfo, fetchedAt: Date.now() });
+}
 
 // Keyed by "kind:id" so a reply in flight for one bot/group doesn't lock
 // the composer for every other chat -- multi-bot is the whole point of
@@ -687,8 +715,25 @@ function messageText(row, kind) {
   return kind === "bot" ? extractText(row) : row.text || "";
 }
 
+// Bumped once per render call, synchronously -- the async preview-card
+// insertion step (see insertPreviewCardsAsync) captures its own value at
+// start and checks it before every DOM mutation, so a render superseded
+// by a newer one (the 5s poll firing again, or switching chats) always
+// notices and stops touching a pane it no longer owns. Real bug found
+// live without this: interleaving awaited network fetches directly into
+// the per-row render loop meant one call to renderMessages could take
+// multiple seconds; the poll timer firing again mid-way started a SECOND
+// overlapping render that wiped the pane out from under the first,
+// producing exactly the "messages constantly coming and going" flicker
+// reported live. The fix is this file's general shape, not just the
+// counter: the base message list below is built synchronously start to
+// finish with no awaits at all, so it can never be caught mid-render by
+// a second call the way the old version could.
+let renderGeneration = 0;
+
 function renderMessages(rows, kind, previewPaths) {
   const pane = document.getElementById("messages-pane");
+  const myGeneration = ++renderGeneration;
   // Only messages beyond what the previous render already showed get the
   // pop-in animation -- rows are rebuilt from scratch on every poll/send,
   // and re-animating the whole history each time would be noisy, not
@@ -703,6 +748,12 @@ function renderMessages(rows, kind, previewPaths) {
     lastRenderedCount = 0;
     return;
   }
+  // Anchor nodes recorded as each row is built, so preview cards can be
+  // positioned afterward via insertBefore against a stable reference
+  // instead of relying on "whatever the pane's last child happens to be"
+  // (only safe when nothing else can insert in between, which async
+  // fetches can no longer guarantee here).
+  const anchors = []; // {node, ts}
   let lastDayKey = null;
   rows.forEach((row, i) => {
     const ts = messageTimestamp(row);
@@ -755,16 +806,60 @@ function renderMessages(rows, kind, previewPaths) {
 
     if (i >= animateFrom) div.classList.add("msg-pop");
     pane.appendChild(div);
+    anchors.push({ node: div, ts: ts || 0 });
   });
   lastRenderedCount = rows.length;
   pane.scrollTop = pane.scrollHeight;
-  // Fire-and-forget: each call is independent, cache-backed after the
-  // first fetch (see previewCache), and appendPreviewCard already
-  // swallows its own failures -- nothing here needs to block the rest of
-  // the render on a network round trip.
-  if (previewPaths) {
-    for (const path of previewPaths) appendPreviewCard(path);
+
+  // The only async part left, deliberately decoupled from everything
+  // above -- guarded by myGeneration so a render superseded by a newer
+  // poll before this finishes fetching can never insert into (or scroll)
+  // a pane it no longer owns.
+  if (previewPaths && previewPaths.size) {
+    insertPreviewCardsAsync(pane, anchors, previewPaths, myGeneration);
   }
+}
+
+// previewPaths is a Map<path, timestamp> -- processed oldest first so
+// each card is positioned right after the anchor (a rendered message, or
+// a previously-inserted card) it chronologically belongs after, instead
+// of every card landing in one batch at the very end regardless of when
+// the file was actually generated. Real bug found live: a file generated
+// early in a long conversation rendered BELOW messages sent long after
+// it -- newest-message-last (the one thing a chat pane must always get
+// right) was broken.
+//
+// Deliberately fire-and-forget from renderMessages' point of view (not
+// awaited there) -- this can take a real network round trip per
+// uncached path, and renderMessages itself must stay fast and
+// synchronous (see its own comment for why). Every mutation here checks
+// myGeneration first specifically so that being unawaited is safe: if a
+// newer render has started in the meantime, this generation is stale and
+// silently stops touching a pane it no longer owns, rather than
+// inserting into (or scrolling) whatever the pane has since become.
+async function insertPreviewCardsAsync(pane, anchors, previewPaths, myGeneration) {
+  const pending = Array.from(previewPaths.entries()).sort((a, b) => a[1] - b[1]);
+  for (const [path, ts] of pending) {
+    const card = await buildPreviewCard(path);
+    if (renderGeneration !== myGeneration) return; // superseded -- stop here
+    if (!card) continue;
+    let anchorNode = null;
+    for (const a of anchors) {
+      if (a.ts <= ts) anchorNode = a.node;
+      else break;
+    }
+    if (anchorNode) {
+      pane.insertBefore(card, anchorNode.nextSibling);
+    } else {
+      pane.insertBefore(card, pane.firstChild);
+    }
+    // Anchors are processed in ascending ts order and pending is sorted
+    // the same way, so appending (not re-sorting) keeps this list valid
+    // for the next iteration -- this card's ts is always >= every anchor
+    // already in the list.
+    anchors.push({ node: card, ts });
+  }
+  if (renderGeneration === myGeneration) pane.scrollTop = pane.scrollHeight;
 }
 
 function showTypingIndicator() {
@@ -997,11 +1092,25 @@ function findPreviewPathsInArgs(args, out, depth, maxCandidates = 8) {
 // much higher cap than the live-stream case (one whole conversation's
 // worth of files, not just one turn's) -- cheap, since each unique path
 // is a single cache-backed fetch, not a per-message cost.
+// Returns path -> timestamp (the row it was first found in), not just a
+// bare list -- real bug found live: rendering every detected preview card
+// in one batch after the whole message loop meant a file generated early
+// in a long conversation still landed at the very bottom, below messages
+// sent long after it -- newest-message-last (the one thing a chat pane
+// must always get right) was broken. renderMessages uses this timestamp
+// to insert each card right after the message it actually belongs to,
+// not always at the end.
 function findPreviewPathsInHistory(rawRows) {
-  const out = new Set();
+  const out = new Map();
   for (const row of rawRows) {
     if (row.role !== "tool" && row.role !== "assistant") continue;
-    findPreviewPathsInArgs(extractText(row), out, 0, 40);
+    const found = new Set();
+    findPreviewPathsInArgs(extractText(row), found, 0, 40);
+    if (!found.size) continue;
+    const ts = messageTimestamp(row) || 0;
+    for (const path of found) {
+      if (!out.has(path)) out.set(path, ts); // first (earliest) occurrence wins
+    }
   }
   return out;
 }
@@ -1086,22 +1195,24 @@ document.getElementById("preview-close-btn").addEventListener("click", () => {
   releaseCurrentPreviewBlobUrl();
 });
 
-async function appendPreviewCard(path) {
-  const pane = document.getElementById("messages-pane");
-  let fileInfo;
-  if (previewCache.has(path)) {
-    fileInfo = previewCache.get(path);
-  } else {
+// Fetches + builds a preview card element without inserting it anywhere
+// -- the caller decides where it goes (appended live during streaming,
+// or positioned chronologically among history, see
+// insertPreviewCardsAsync). Returns null for a path that turned out not
+// to be a real previewable file (a regex guess that didn't pan out).
+async function buildPreviewCard(path) {
+  let fileInfo = getCachedPreview(path);
+  if (fileInfo === undefined) {
     try {
       fileInfo = await apiGet(`/files/read?path=${encodeURIComponent(path)}`);
     } catch (_) {
       fileInfo = null; // the path was a guess (matched by regex, not confirmed) -- cache the miss too
     }
-    previewCache.set(path, fileInfo);
+    setCachedPreview(path, fileInfo);
   }
   const mimeType = fileInfo && fileInfo.mime_type;
   const isPreviewable = mimeType && (mimeType.startsWith("text/html") || mimeType.startsWith("image/"));
-  if (!fileInfo || !fileInfo.data_url || !isPreviewable) return;
+  if (!fileInfo || !fileInfo.data_url || !isPreviewable) return null;
   const isImage = mimeType.startsWith("image/");
 
   const card = document.createElement("div");
@@ -1124,7 +1235,20 @@ async function appendPreviewCard(path) {
   hint.textContent = isImage ? "Image" : "Preview";
   header.appendChild(hint);
   card.appendChild(header);
+  return card;
+}
 
+// Live-streaming use only (see streamBotReply) -- one turn's own cards,
+// appended in the order awaited, at whatever is currently the pane's
+// last child. Safe there specifically because a streaming turn is a
+// single linear sequence with no concurrent render of the same pane
+// racing it. NOT used for history rendering -- see
+// insertPreviewCardsAsync, which positions cards chronologically instead
+// of just at the end, and guards against a superseded render.
+async function appendPreviewCard(path) {
+  const card = await buildPreviewCard(path);
+  if (!card) return;
+  const pane = document.getElementById("messages-pane");
   pane.appendChild(card);
   pane.scrollTop = pane.scrollHeight;
 }

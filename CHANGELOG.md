@@ -7,6 +7,65 @@ tagged on `main`.
 ## [Unreleased]
 
 ### Fixed
+- Real regression found live, right after the chronological preview-card
+  ordering fix below shipped: making `renderMessages` interleave awaited
+  network fetches directly into its per-row render loop meant one call
+  could take multiple real seconds, and the poll timer firing again
+  mid-way (every 5s, unconditionally) started a SECOND overlapping render
+  that wiped the pane out from under the first -- reported live as chat
+  messages "constantly coming and going." Fixed by making the base
+  message render fully synchronous again (no awaits in that loop at all)
+  and moving preview-card insertion to a separately-guarded async step: a
+  `renderGeneration` counter is bumped once per render call, and every
+  DOM mutation in the async step checks it first, so a render superseded
+  by a newer poll silently stops touching a pane it no longer owns
+  instead of corrupting it. Confirmed live: message count in the pane
+  now holds rock-steady across repeated poll cycles instead of swinging
+  wildly (44 -> 5 -> 38 -> 44 -> ...).
+  - A second, smaller version of the same flicker surfaced fixing the
+    first: the preview-cache TTL (4s) was shorter than the poll interval
+    (5s), so every single poll forced a real network re-fetch for every
+    card, and the instantly-rendered base message list beat the cards
+    back into view by a beat -- visible as cards vanishing and
+    reappearing every 5 seconds. Fixed by raising the TTL to 15s,
+    comfortably above one poll period, so a normal poll hits cache
+    (same paint frame, no visible gap) and a genuinely regenerated file
+    still surfaces within one TTL window rather than indefinitely.
+
+### Added
+- A new `RESPONSE_STYLE` guardrail: when a bot revises a file it already
+  generated for the user (a webpage, image, document) based on feedback,
+  it now saves the new version under a NEW filename instead of
+  overwriting the original. Reported live as "generations aren't
+  working, I still see the same page" -- the bot WAS actually producing
+  updated content each time, but silently overwriting the same path, so
+  a stale client-side preview cache (see the TTL fix above) made every
+  iteration look like nothing had changed. Versioning the file is the
+  real fix (the user can always go back and compare an earlier version,
+  not just trust a timestamp), with the cache TTL as a second line of
+  defense for whatever still shares a path.
+
+### Fixed
+- Preview cards were rendered in one batch after the whole message loop,
+  so a file generated early in a long conversation still landed at the
+  very bottom of the chat, below messages sent long after it -- newest-
+  message-last (the one thing a chat pane must always get right) was
+  broken. Real bug reported live. Fixed by having `findPreviewPathsInHistory`
+  record each path's first-occurrence timestamp and `renderMessages`
+  interleave each card right after the message it chronologically
+  belongs to, awaiting each insertion in order (not fire-and-forget --
+  concurrent unawaited fetches can resolve out of order and undo the fix).
+  Confirmed live against a real conversation with several generated
+  files at different points: each card now lands exactly where it was
+  generated, and the conversation still ends on the latest real message.
+- `previewCache` never expired, so a bot regenerating the SAME file path
+  (e.g. "change the color to purple" on a landing page it already built)
+  kept showing whatever content was fetched the FIRST time, forever --
+  reported live as "generations aren't working, I still see the same
+  page." Fixed with a short (4s) TTL instead of session-permanent
+  caching: still dedupes repeat hits within one render pass, but the
+  next poll always re-fetches, so a genuinely-changed file is never more
+  than one poll cycle stale.
 - The preview panel's "Open full size" link silently did nothing when
   clicked -- real bug found live: it pointed at the file's `data:` URI
   directly with `target="_blank"`, and Chrome (and other modern browsers)
