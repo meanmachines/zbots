@@ -442,6 +442,39 @@ class BotCreate(BaseModel):
     no_skills: bool = False
 
 
+async def _bot_current_provider_model(name: str) -> tuple[Optional[str], Optional[str]]:
+    """This bot's actual current (provider, model) -- same resolution order
+    as the roster builder (locked session override first, then Hermes'
+    own profile record). Used to PIN a routine's provider/model at creation
+    time instead of leaving the job unpinned.
+
+    Hermes' own drift guard (cron/scheduler.py, issue #44585) deliberately
+    fails an unpinned cron job closed -- no execution, no charge -- the
+    moment its creation-time provider/model resolution stops matching the
+    CURRENT global default, specifically to stop a routine from silently
+    switching to a different (possibly paid) model out from under the
+    user. Real, live consequence found for zBots: every routine created
+    here left provider/model unset, so any later bot model change (the
+    roster's own "change model" action, used all the time) silently broke
+    every one of that bot's existing routines -- reported live as "your
+    hourly hydration reminder has been failing since the model switch."
+    Pinning to whatever the bot is actually running right now sidesteps
+    the guard entirely (a pinned axis is never considered drifted) and
+    keeps the routine tied to a fixed, known-good target instead of
+    "whatever this bot happens to default to at fire time."
+    """
+    state = _read_state()
+    locked = (state.get("locked_models") or {}).get(name) or {}
+    if locked.get("provider") and locked.get("model"):
+        return locked["provider"], locked["model"]
+    profiles_resp = await dash_get("/api/profiles")
+    profiles = profiles_resp.get("profiles", []) if isinstance(profiles_resp, dict) else profiles_resp
+    for p in profiles:
+        if p.get("name") == name:
+            return locked.get("provider") or p.get("provider"), locked.get("model") or p.get("model")
+    return locked.get("provider"), locked.get("model")
+
+
 async def _default_model() -> tuple[Optional[str], Optional[str]]:
     """The 'default' profile's own (provider, model), to fall back on.
 
@@ -878,14 +911,28 @@ async def group_send(group_id: str, body: GroupSend) -> dict:
 # Routines (real hermes cron jobs, namespaced "[bot:<name>] <routine>")
 # --------------------------------------------------------------------------
 
-def _routine_job_name(bot: str, routine: str) -> str:
+def _routine_job_name(bot: str, routine: str, target: Optional[str] = None) -> str:
+    # target != bot is a cross-bot nudge (this bot's routine delivers into
+    # ANOTHER bot's chat) -- recorded in the name itself since "deliver"
+    # stays "local" for every routine now (see create_routine's own
+    # comment for why), so the name is the only place this survives to be
+    # read back for display.
+    if target and target != bot:
+        return f"[bot:{bot}->{target}] {routine}"
     return f"[bot:{bot}] {routine}"
 
 
+_ROUTINE_NAME_RE = re.compile(r"^\[bot:([a-zA-Z0-9_-]+)(?:->([a-zA-Z0-9_-]+))?\]")
+
+
 def _routine_bot_from_job(job: dict) -> Optional[str]:
-    name = job.get("name") or ""
-    m = re.match(r"^\[bot:([a-zA-Z0-9_-]+)\]", name)
+    m = _ROUTINE_NAME_RE.match(job.get("name") or "")
     return m.group(1) if m else None
+
+
+def _routine_target_from_job(job: dict) -> Optional[str]:
+    m = _ROUTINE_NAME_RE.match(job.get("name") or "")
+    return m.group(2) if m else None
 
 
 @app.get("/bots/{name}/routines")
@@ -893,26 +940,77 @@ async def list_routines(name: str) -> list[dict]:
     name = _validate_name(name)
     jobs = await dash_get("/api/cron/jobs", profile="all")
     rows = jobs if isinstance(jobs, list) else jobs.get("data", [])
-    return [j for j in rows if _routine_bot_from_job(j) == name]
+    out = []
+    for j in rows:
+        if _routine_bot_from_job(j) != name:
+            continue
+        j = dict(j)
+        j["target_bot"] = _routine_target_from_job(j)
+        out.append(j)
+    return out
 
 
 class RoutineCreate(BaseModel):
     routine: str  # short label, becomes part of the job name
     prompt: str
     schedule: str  # raw hermes cron schedule string
+    target_bot: Optional[str] = None  # deliver into ANOTHER bot's chat instead of this one's
 
 
 @app.post("/bots/{name}/routines")
 async def create_routine(name: str, body: RoutineCreate) -> dict:
     name = _validate_name(name)
+    target = _validate_name(body.target_bot) if body.target_bot else name
+    provider, model = await _bot_current_provider_model(name)
+    # Delivery: Hermes' own native "bot-chat" deliver target looked like the
+    # obvious choice (it's built for exactly this -- posting a job's output
+    # as an inbound turn on a profile's chat), and DOES work for RECURRING
+    # jobs. For a FINITE one-shot ("30m", "1m", etc.) it doesn't: confirmed
+    # live, twice, with zero log trace either time -- the job fires, and
+    # instead of landing in state=completed (like an identical job with
+    # deliver=local does) it's deleted outright from the store, so nothing
+    # ever reaches the chat and there's nothing left to even diagnose.
+    # bot-chat's own delivery path spawns a SEPARATE `hermes chat` CLI
+    # subprocess against the same HERMES_HOME, which runs its own
+    # gateway-boot-style reconcile on start -- the leading theory, not yet
+    # proven, is that reconcile treats the just-fired one-shot as an orphan
+    # and prunes it out from under the parent process before the normal
+    # one-shot completion bookkeeping runs.
+    #
+    # Used instead: the SAME mechanism this gateway's own pre-existing
+    # agentic cron jobs (bobby-checkin, hydration-reminder, ...) already use
+    # successfully today -- confirmed live, both before and after this fix,
+    # real chat turns landing in the target bot's actual visible history.
+    # The prompt itself instructs the model to call its message_bot tool
+    # (backend/supervisor_mcp.py, already registered for every profile) to
+    # deliver the result, so "deliver" stays "local": the delivery already
+    # happened as a tool call inside the turn, and auto-delivering the raw
+    # turn output on top of that would just double-post it.
+    wrapped_prompt = (
+        f"{body.prompt}\n\n"
+        f"When you're done, use your message_bot tool to send bot name "
+        f"{target} the result as a short, friendly chat message -- not a "
+        f"raw dump of your reasoning."
+    )
     return await dash_send(
         "POST",
         f"/api/cron/jobs?profile={name}",
         {
-            "name": _routine_job_name(name, body.routine),
-            "prompt": body.prompt,
+            "name": _routine_job_name(name, body.routine, target),
+            "prompt": wrapped_prompt,
             "schedule": body.schedule,
             "deliver": "local",
+            # Pinned so a later model switch on this bot can never trip
+            # Hermes' own provider/model drift guard (cron/scheduler.py,
+            # #44585), which fails an unpinned job closed -- no run, no
+            # charge -- the moment its creation-time resolution stops
+            # matching the current default. See
+            # _bot_current_provider_model's docstring for the live bug
+            # this caused (a routine silently going dead on a model
+            # switch, reported as "your hourly reminder has been failing
+            # since the model switch").
+            "provider": provider,
+            "model": model,
         },
     )
 

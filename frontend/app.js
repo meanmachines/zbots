@@ -1532,9 +1532,28 @@ document.getElementById("routines-toggle-btn").addEventListener("click", async (
   const pane = document.getElementById("routines-pane");
   pane.classList.toggle("open");
   if (pane.classList.contains("open") && selected && selected.kind === "bot") {
+    populateRoutineTargets(selected.id);
     await loadRoutines(selected.id);
   }
 });
+
+// Cross-bot nudges (one bot's routine delivering into ANOTHER bot's chat)
+// use Hermes' own real "bot-chat:<profile>" cron delivery lane -- see
+// create_routine's own comment for why. Every other live bot is a valid
+// target; the current one is left out since that's just the default
+// "this bot's chat" option already in the list.
+function populateRoutineTargets(currentBotId) {
+  const sel = document.getElementById("routine-target");
+  sel.innerHTML = '<option value="">Deliver to: this bot\'s chat</option>';
+  roster
+    .filter((r) => r.name !== currentBotId)
+    .forEach((r) => {
+      const opt = document.createElement("option");
+      opt.value = r.name;
+      opt.textContent = "Deliver to: " + r.title;
+      sel.appendChild(opt);
+    });
+}
 document.getElementById("routines-close-btn").addEventListener("click", () => {
   document.getElementById("routines-pane").classList.remove("open");
 });
@@ -1555,16 +1574,35 @@ async function loadRoutines(botName) {
   }
 }
 
+function _routineDeliverLabel(targetBot) {
+  if (!targetBot) return "";
+  const target = roster.find((r) => r.name === targetBot);
+  return "-> " + (target ? target.title : targetBot);
+}
+
 function routineCard(job) {
   const card = document.createElement("div");
   card.className = "routine-card";
   const name = document.createElement("div");
   name.className = "routine-card-name";
-  name.textContent = (job.name || "").replace(/^\[bot:[a-zA-Z0-9_-]+\]\s*/, "");
+  name.textContent = (job.name || "").replace(/^\[bot:[a-zA-Z0-9_-]+(?:->[a-zA-Z0-9_-]+)?\]\s*/, "");
   const schedule = document.createElement("div");
   schedule.className = "routine-card-schedule";
-  schedule.textContent = job.schedule || "";
+  // job.schedule is a structured object ({kind, run_at, display}, per
+  // Hermes' own cron job shape) -- job.schedule_display is the ready-made
+  // human string. Real bug found live: this used to read job.schedule
+  // directly, rendering the literal "[object Object]" in every routine
+  // card instead of e.g. "once in 1m".
+  schedule.textContent = job.schedule_display || "";
   card.append(name, schedule);
+
+  const target = _routineDeliverLabel(job.target_bot);
+  if (target) {
+    const targetEl = document.createElement("div");
+    targetEl.className = "routine-card-target";
+    targetEl.textContent = target;
+    card.appendChild(targetEl);
+  }
 
   const actions = document.createElement("div");
   actions.className = "routine-card-actions";
@@ -1600,8 +1638,9 @@ document.getElementById("add-routine-form").addEventListener("submit", async (e)
   const routine = document.getElementById("routine-name").value.trim();
   const prompt = document.getElementById("routine-prompt").value.trim();
   const schedule = document.getElementById("routine-schedule").value.trim();
+  const target_bot = document.getElementById("routine-target").value || undefined;
   try {
-    await apiSend("POST", `/bots/${selected.id}/routines`, { routine, prompt, schedule });
+    await apiSend("POST", `/bots/${selected.id}/routines`, { routine, prompt, schedule, target_bot });
     document.getElementById("add-routine-form").reset();
     toast("Routine added");
     await loadRoutines(selected.id);

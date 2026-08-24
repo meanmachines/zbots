@@ -7,6 +7,62 @@ tagged on `main`.
 ## [Unreleased]
 
 ### Fixed
+- Routines silently went nowhere. `create_routine` hardcoded
+  `deliver: "local"`, which runs a routine's prompt in its own private
+  `cron_<id>_<timestamp>` session and posts the result nowhere -- confirmed
+  live, a completed test routine left zero trace across 200 fetched
+  messages. Every routine ever created through zBots' own Add Routine form
+  was invisible the moment it fired. Tried Hermes' native "bot-chat"
+  deliver target next; it works for recurring jobs but silently deletes a
+  finite one-shot job outright on fire (confirmed live, twice, with no log
+  trace either time -- leading theory is its delivery subprocess's own
+  gateway-boot-style reconcile treating the just-fired one-shot as an
+  orphan). Landed on the same mechanism this gateway's own pre-existing
+  agentic cron jobs already use successfully: the prompt itself now
+  instructs the model to call its `message_bot` tool
+  (`backend/supervisor_mcp.py`, already registered for every profile) to
+  deliver the result, with `deliver` staying `"local"` (the delivery
+  already happened as a tool call, so auto-delivering on top would double
+  it). Confirmed live end-to-end, including cross-bot: a routine on
+  `default` targeting `butler` landed a real turn in butler's own visible
+  chat, butler replied to it normally.
+- Every routine zBots created was born unpinned (no explicit
+  provider/model), which trips Hermes' own provider/model drift guard
+  (`cron/scheduler.py`, #44585) the moment the bot's model is later
+  switched -- it fails the job closed (no run, no charge) rather than
+  silently switching spend. Confirmed live and exactly matching a real
+  report ("your hourly hydration reminder has been failing since the
+  model switch"): the actual `hydration-reminder` job had a 13-run
+  failure streak, all `[drift_skip]`, and a second pre-existing job
+  (`bobby-checkin`) was in the same state. `create_routine` now resolves
+  and pins the bot's actual current (provider, model) at creation time,
+  which the drift guard treats as intentional and never touches; both
+  broken production jobs were re-pinned to their current live model and
+  confirmed firing clean (`last_status: "ok"`, failure streak reset to 0,
+  a real reply landed in that bot's chat) as part of this fix, not just
+  the code path for future routines.
+- A cross-bot delivery target became reachable in the Add Routine form
+  itself: a "Deliver to: <bot>" dropdown (any other live bot, populated
+  from the roster) alongside the existing "this bot's chat" default,
+  wired through to the same `message_bot`-based delivery above --
+  previously only achievable by a bot agentically creating its own cron
+  job with the right prompt, never from the UI.
+- Two bots' recurring "every Nh" check-ins (`bobby-checkin`,
+  `butler-checkin`) were permanently stuck in `state: "error"` with
+  `next_run_at: null` after their very first tick, surfacing a misleading
+  "is the 'croniter' package installed?" error that had nothing to do
+  with croniter. Root cause, in the vendored `cron/jobs.py`'s
+  `compute_next_run`: an interval schedule's next-run computation only
+  ever read a `"minutes"` key, but these two jobs were persisted as
+  `{"kind": "interval", "hours": 10}` (built directly, not through
+  `parse_schedule`'s string-to-minutes normalization) -- `minutes` was
+  always `None`, so the function returned `None` unconditionally and the
+  caller reported it as a generic recurring-schedule failure. Fixed
+  `compute_next_run` (plus the two other next-run/interval-length
+  helpers in `cron/scheduler.py` and `tools/blueprints.py` that had the
+  identical minutes-only assumption) to also accept `hours`/`days`.
+  Confirmed live: `bobby-checkin` immediately got a real computed
+  `next_run_at` again instead of `null`.
 - The card flicker came back right after the previous revert ("cards are
   still flickering") because the revert only undid one attempted fix, not
   the actual root cause: `loadMessages` unconditionally wiped and rebuilt
@@ -68,6 +124,11 @@ tagged on `main`.
   different, never-cached path. Confirmed live: message count in the
   pane held at a constant 44 across a full 35-second observation window,
   not a single dip.
+- Every routine card in the Routines panel rendered its schedule as the
+  literal text "[object Object]" -- a job's `schedule` field is a
+  structured object (`{kind, run_at, display}`), and the card read it
+  directly instead of the ready-made `schedule_display` string Hermes
+  already provides.
 
 ### Added
 - Bare URLs in chat now render as real clickable links -- the markdown
