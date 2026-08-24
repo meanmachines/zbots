@@ -15,6 +15,7 @@ const ICONS = {
   skills: '<path d="M12 2 3 7v6c0 5 4 8 9 9 5-1 9-4 9-9V7l-9-5Z"/><path d="m9 12 2 2 4-4"/>',
   plugins: '<path d="M9 3v4M15 3v4M6 7h12l-1 5H7L6 7Z"/><path d="M7 12v3a5 5 0 0 0 10 0v-3M12 20v-3"/>',
   files: '<path d="M6 3h9l5 5v13H6V3Z"/><path d="M15 3v5h5"/>',
+  image: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.75"/><path d="m4 17 5-5 4 4 3-3 4 4"/>',
   env: '<path d="m5 4 3 8-3 8M19 4h-9M19 20h-9M13 12h6"/>',
   webhooks: '<circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8.2 7.2 15.8 16.8M15.8 7.2 8.2 16.8M8.5 6h7"/>',
   connectors: '<path d="M9 15 4.5 19.5a2.1 2.1 0 0 1-3-3L6 12"/><path d="M15 9l4.5-4.5a2.1 2.1 0 0 1 3 3L18 12"/><path d="m9 15 6-6"/><path d="M13 3l3 3M18 8l3 3"/>',

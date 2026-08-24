@@ -10,13 +10,14 @@ let rosterPollTimer = null;
 let messagesPollTimer = null;
 let lastRenderedCount = -1; // -1 means "next render is a fresh thread open, don't animate"
 
-// path -> fileInfo (or null for "checked, not a real HTML file") -- renderMessages
-// re-scans and re-appends preview cards on every poll (rows are rebuilt from
-// scratch each time, same as everything else in this pane), so without this
-// cache a file that's still there five messages later would get re-fetched
-// over the wire every 5s for no reason. Session-lifetime only, never expired --
-// a file a bot already built doesn't change out from under a stable path.
-let htmlPreviewCache = new Map();
+// path -> fileInfo (or null for "checked, not a previewable file") --
+// renderMessages re-scans and re-appends preview cards on every poll (rows
+// are rebuilt from scratch each time, same as everything else in this
+// pane), so without this cache a file that's still there five messages
+// later would get re-fetched over the wire every 5s for no reason.
+// Session-lifetime only, never expired -- a file a bot already built
+// doesn't change out from under a stable path.
+let previewCache = new Map();
 
 // Keyed by "kind:id" so a reply in flight for one bot/group doesn't lock
 // the composer for every other chat -- multi-bot is the whole point of
@@ -686,7 +687,7 @@ function messageText(row, kind) {
   return kind === "bot" ? extractText(row) : row.text || "";
 }
 
-function renderMessages(rows, kind, htmlPaths) {
+function renderMessages(rows, kind, previewPaths) {
   const pane = document.getElementById("messages-pane");
   // Only messages beyond what the previous render already showed get the
   // pop-in animation -- rows are rebuilt from scratch on every poll/send,
@@ -758,11 +759,11 @@ function renderMessages(rows, kind, htmlPaths) {
   lastRenderedCount = rows.length;
   pane.scrollTop = pane.scrollHeight;
   // Fire-and-forget: each call is independent, cache-backed after the
-  // first fetch (see htmlPreviewCache), and appendHtmlPreviewCard already
+  // first fetch (see previewCache), and appendPreviewCard already
   // swallows its own failures -- nothing here needs to block the rest of
   // the render on a network round trip.
-  if (htmlPaths) {
-    for (const path of htmlPaths) appendHtmlPreviewCard(path);
+  if (previewPaths) {
+    for (const path of previewPaths) appendPreviewCard(path);
   }
 }
 
@@ -912,107 +913,173 @@ function appendFinalBotMessage(content) {
   return div;
 }
 
-// Live preview of a file a bot just built -- real gap found live: a bot
-// asked to "build a landing page" has plenty of ways to actually write
-// the file (its own terminal tool, a dedicated file-write tool, whatever
-// it has), but none of those show the RESULT -- the user has to already
-// know the file exists and go find it on the Files page. Rather than
-// hardcode one tool name (fragile -- ties this to whatever tool happens
-// to be wired in today), this scans every tool call's own args for a
-// string that looks like an .html/.htm path, tool-agnostic by
+// Live preview of a file a bot just built -- pages, images, icons, any
+// generated output. Real gap found live: a bot asked to "build a landing
+// page" (or generate an image) has plenty of ways to actually produce the
+// file (its own terminal tool, a dedicated file-write/image-gen tool,
+// whatever it has), but none of those show the RESULT -- the user has to
+// already know the file exists and go find it on the Files page. Rather
+// than hardcode one tool name (fragile -- ties this to whatever tool
+// happens to be wired in today), this scans every tool call's own args
+// for a string that looks like a previewable file path, tool-agnostic by
 // construction: any tool that takes a file path argument works
 // automatically, no allowlist to maintain. Real backend support already
 // exists for the render step -- GET /files/read already returns a
-// data_url (data:text/html;base64,...) for exactly this purpose, so
-// there's no new backend plumbing needed, just wiring the frontend up to
-// call it and show what comes back.
+// data_url (data:<mime>;base64,...) for exactly this purpose regardless
+// of file type, so there's no new backend plumbing needed, just wiring
+// the frontend up to call it and show what comes back.
+//
+// Also matches hermes-agent's own real MEDIA:<path> tag convention (see
+// api_server.py's _resolve_media_to_data_urls) -- confirmed live that tag
+// is resolved to an inline data URL ONLY in the live SSE event at
+// generation time, never in what actually gets persisted to message
+// history, so a reopened conversation (or the next 5s poll rebuilding the
+// pane) shows the literal unresolved "MEDIA:/root/foo.png" text with no
+// image at all. Stripping the prefix and running it through this same
+// preview pipeline fixes that without touching any backend code.
+//
 // Not anchored to the whole string -- real bug found live: a terminal-
 // style tool wraps the actual path inside a full shell command
 // ("cat /root/page.html | head -c 100"), so an exact-match regex never
 // fires for the single most common way a bot actually touches a file.
 // Matches a path-shaped token (no whitespace/quotes/shell metacharacters)
-// ending in .html/.htm anywhere in the string instead.
-const HTML_PATH_RE = /[^\s"'<>|;&]+\.html?\b/gi;
+// ending in a previewable extension anywhere in the string instead.
+// Requires an actual path separator ("/") -- real bug found live scanning
+// a bot's whole history: without this, casual prose mentioning a bare
+// filename ("Logo.png") or a generic placeholder ("/path/to/image.png")
+// matched just as eagerly as a real path, and a shared match budget
+// across the whole conversation meant those false positives could crowd
+// out the real, recent file before it was ever reached.
+// ":" excluded from the flexible parts (not just the fixed "MEDIA:"
+// prefix) specifically so this can never match into an http(s):// URL --
+// real bug found live: with ":" allowed, matching still reached partway
+// into remote image URLs (a weather-icon CDN mentioned in an unrelated
+// conversation), consuming slots in the match budget for links
+// renderMarkdown already displays correctly on its own and /files/read
+// could never resolve anyway (it only ever reads a local path).
+const PREVIEWABLE_PATH_RE = /(?:MEDIA:)?[^\s"'<>|;&:]*\/[^\s"'<>|;&:]+\.(?:html?|png|jpe?g|gif|svg|webp|ico)\b/gi;
 
-function findHtmlPathsInArgs(args, out, depth) {
-  if (depth > 4 || out.size > 8) return; // bounded -- args are attacker/model-controlled shape
+function findPreviewPathsInArgs(args, out, depth, maxCandidates = 8) {
+  if (depth > 4 || out.size > maxCandidates) return; // bounded -- args are attacker/model-controlled shape
   if (typeof args === "string") {
-    for (const m of args.matchAll(HTML_PATH_RE)) {
-      if (out.size > 8) break;
-      out.add(m[0]);
+    for (const m of args.matchAll(PREVIEWABLE_PATH_RE)) {
+      if (out.size > maxCandidates) break;
+      const path = m[0].replace(/^MEDIA:/i, "");
+      // Excludes remote URLs (http://.../foo.png) -- these are already
+      // real, already-working markdown images (renderMarkdown handles
+      // ![]()  syntax on its own) or plain links; /files/read only ever
+      // resolves a LOCAL path, so a URL here would just be a guaranteed
+      // 404 that ate a slot in the match budget for nothing.
+      if (path.includes("://")) continue;
+      out.add(path);
     }
     return;
   }
   if (Array.isArray(args)) {
-    for (const v of args) findHtmlPathsInArgs(v, out, depth + 1);
+    for (const v of args) findPreviewPathsInArgs(v, out, depth + 1, maxCandidates);
     return;
   }
   if (args && typeof args === "object") {
-    for (const v of Object.values(args)) findHtmlPathsInArgs(v, out, depth + 1);
+    for (const v of Object.values(args)) findPreviewPathsInArgs(v, out, depth + 1, maxCandidates);
   }
 }
 
 // Same detection, run over a bot's REAL persisted history instead of the
 // live SSE stream -- real bug found live: the live-stream version alone
 // only works for a turn that's actively happening right now; reopening an
-// older conversation (or the next 5s poll rebuilding the whole pane, see
+// older conversation (or the next 5s poll rebuilding the panel, see
 // renderMessages) lost the preview entirely, because it's never part of
 // the persisted message content itself. Scans "tool" rows (the actual
 // call/result JSON, wherever a real path lives) and "assistant" rows
 // (covers a bot just TELLING the user where a file is, like "It's at
-// /root/foo.html", which is at least as reliable a signal as a raw tool
-// argument and needs zero tool-shape knowledge at all).
-function findHtmlPathsInHistory(rawRows) {
+// /root/foo.html" or a MEDIA: tag, which is at least as reliable a signal
+// as a raw tool argument and needs zero tool-shape knowledge at all). A
+// much higher cap than the live-stream case (one whole conversation's
+// worth of files, not just one turn's) -- cheap, since each unique path
+// is a single cache-backed fetch, not a per-message cost.
+function findPreviewPathsInHistory(rawRows) {
   const out = new Set();
   for (const row of rawRows) {
     if (row.role !== "tool" && row.role !== "assistant") continue;
-    findHtmlPathsInArgs(extractText(row), out, 0);
+    findPreviewPathsInArgs(extractText(row), out, 0, 40);
   }
   return out;
 }
 
-async function appendHtmlPreviewCard(path) {
+// Opens the real file in the side panel (#preview-pane) -- real feedback
+// live: rendering a page (or an image) inline at chat-bubble width made
+// it unreadable, this needs its own real estate, same reasoning
+// #routines-pane already established for "content that doesn't fit the
+// message column." One panel, one body element swapped between an
+// <iframe> (pages) and an <img> (images/icons) depending on what actually
+// came back -- an <img> gives correct aspect-ratio sizing and native
+// zoom/save behavior that forcing an image through an iframe would not.
+function openPreviewPane(fileInfo, path) {
+  document.getElementById("preview-header-name").textContent = fileInfo.name || path;
+  const openLink = document.getElementById("preview-header-open");
+  openLink.href = fileInfo.data_url;
+  const isImage = (fileInfo.mime_type || "").startsWith("image/");
+  const frame = document.getElementById("preview-frame");
+  const img = document.getElementById("preview-image");
+  if (isImage) {
+    frame.style.display = "none";
+    frame.src = "about:blank";
+    img.style.display = "";
+    img.src = fileInfo.data_url;
+    img.alt = fileInfo.name || path;
+  } else {
+    img.style.display = "none";
+    img.src = "";
+    frame.style.display = "";
+    frame.src = fileInfo.data_url;
+  }
+  document.getElementById("preview-pane").classList.add("open");
+}
+
+document.getElementById("preview-close-btn").addEventListener("click", () => {
+  document.getElementById("preview-pane").classList.remove("open");
+  document.getElementById("preview-frame").src = "about:blank";
+  document.getElementById("preview-image").src = "";
+});
+
+async function appendPreviewCard(path) {
   const pane = document.getElementById("messages-pane");
   let fileInfo;
-  if (htmlPreviewCache.has(path)) {
-    fileInfo = htmlPreviewCache.get(path);
+  if (previewCache.has(path)) {
+    fileInfo = previewCache.get(path);
   } else {
     try {
       fileInfo = await apiGet(`/files/read?path=${encodeURIComponent(path)}`);
     } catch (_) {
       fileInfo = null; // the path was a guess (matched by regex, not confirmed) -- cache the miss too
     }
-    htmlPreviewCache.set(path, fileInfo);
+    previewCache.set(path, fileInfo);
   }
-  if (!fileInfo || !fileInfo.data_url || !(fileInfo.mime_type || "").startsWith("text/html")) return;
+  const mimeType = fileInfo && fileInfo.mime_type;
+  const isPreviewable = mimeType && (mimeType.startsWith("text/html") || mimeType.startsWith("image/"));
+  if (!fileInfo || !fileInfo.data_url || !isPreviewable) return;
+  const isImage = mimeType.startsWith("image/");
 
   const card = document.createElement("div");
   card.className = "msg bot msg-pop preview-card";
+  card.title = "Click to preview";
+  card.addEventListener("click", () => openPreviewPane(fileInfo, path));
 
   const header = document.createElement("div");
   header.className = "preview-card-header";
+  const iconSpan = document.createElement("span");
+  iconSpan.className = "preview-card-icon";
+  iconSpan.innerHTML = icon(isImage ? "image" : "files", 16);
+  header.appendChild(iconSpan);
   const name = document.createElement("span");
   name.className = "preview-card-name";
   name.textContent = fileInfo.name || path;
   header.appendChild(name);
-  const openLink = document.createElement("a");
-  openLink.className = "preview-card-open";
-  openLink.href = fileInfo.data_url;
-  openLink.target = "_blank";
-  openLink.rel = "noopener noreferrer";
-  openLink.textContent = "Open full size";
-  header.appendChild(openLink);
+  const hint = document.createElement("span");
+  hint.className = "preview-card-hint";
+  hint.textContent = isImage ? "Image" : "Preview";
+  header.appendChild(hint);
   card.appendChild(header);
-
-  const iframe = document.createElement("iframe");
-  iframe.className = "preview-card-frame";
-  iframe.src = fileInfo.data_url;
-  // No allow-same-origin/allow-top-navigation/allow-popups -- a data: URI
-  // iframe is already an opaque origin the parent can't be reached from,
-  // this is defense in depth against a generated page's own JS trying to
-  // navigate the tab or spawn windows, not a same-origin risk.
-  iframe.sandbox = "allow-scripts allow-forms";
-  card.appendChild(iframe);
 
   pane.appendChild(card);
   pane.scrollTop = pane.scrollHeight;
@@ -1067,7 +1134,7 @@ async function streamBotReply(botName, text, isStillActive) {
   const reader = res.body.getReader();
   const decoder = new TextDecoder("utf-8");
   let buf = "";
-  const htmlPathCandidates = new Set();
+  const previewPathCandidates = new Set();
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -1099,7 +1166,7 @@ async function streamBotReply(botName, text, isStillActive) {
       } else if (eventName === "tool.started") {
         hideTypingIndicator();
         logThinkingStep(toolStatusLabel(payload.tool_name, payload.preview, payload.args));
-        findHtmlPathsInArgs(payload.args, htmlPathCandidates, 0);
+        findPreviewPathsInArgs(payload.args, previewPathCandidates, 0);
       } else if (eventName === "tool.progress" && payload.tool_name === "_thinking") {
         hideTypingIndicator();
         logThinkingStep("Thinking");
@@ -1113,8 +1180,8 @@ async function streamBotReply(botName, text, isStillActive) {
         if (typeof payload.content === "string" && payload.content.trim()) {
           appendFinalBotMessage(payload.content);
         }
-        for (const path of htmlPathCandidates) {
-          await appendHtmlPreviewCard(path);
+        for (const path of previewPathCandidates) {
+          await appendPreviewCard(path);
         }
       } else if (eventName === "run.completed" || eventName === "error") {
         hideTypingIndicator();
@@ -1199,9 +1266,9 @@ async function loadMessages(fromPoll = false) {
       // call/result content a preview path lives in, and get dropped by
       // the very next line's filter (collapseToFinalTurns never sees them
       // either), so this has to happen before that filter runs.
-      const htmlPaths = findHtmlPathsInHistory(rows || []);
+      const previewPaths = findPreviewPathsInHistory(rows || []);
       const chatRows = collapseToFinalTurns((rows || []).filter((r) => r.role === "user" || r.role === "assistant"));
-      renderMessages(chatRows, "bot", htmlPaths);
+      renderMessages(chatRows, "bot", previewPaths);
     } else {
       const rows = await apiGet(`/groups/${selected.id}/messages`);
       renderMessages(rows || [], "group");
@@ -1700,6 +1767,7 @@ function populateIcons() {
   document.getElementById("routines-toggle-btn").innerHTML = icon("clock", 16);
   document.getElementById("chat-menu-btn").innerHTML = icon("more", 16);
   document.getElementById("routines-close-btn").innerHTML = icon("close", 15);
+  document.getElementById("preview-close-btn").innerHTML = icon("close", 15);
   document.getElementById("send-btn").innerHTML = icon("send", 15) + "<span>Send</span>";
   document.getElementById("main-empty-icon").innerHTML = icon("bots", 34);
 }

@@ -598,55 +598,98 @@ input:focus, textarea:focus, select:focus {
 }
 .thinking-step { font-style: normal; }
 
-/* Live preview card -- a bot-generated HTML file rendered inline instead
-   of being a file the user has to already know exists and go find.
-   Real bug found live, two at once: (1) plain .preview-card lost every
-   property that also exists on .msg.bot (max-width/border/padding) --
-   same specificity as a single class, but .msg.bot is TWO classes, so it
-   always won regardless of source order. Compounded onto .msg.preview-card
-   here to actually out-specificity it, matching how .msg.user/.msg.bot
-   already do it themselves rather than relying on cascade order. (2) the
-   card rendered at 0 height with a correctly-sized iframe INSIDE it --
-   overflow: hidden on a flex item (#messages-pane is a column flex
-   container) resolves that item's automatic min-height to 0 per the
-   flexbox spec's own min-size-auto rule, instead of the content height a
-   block layout would give it. flex-shrink: 0 below is the fix -- stop it
-   from participating in flex shrinking at all. */
+/* Live preview chip -- a bot-generated HTML file gets a small clickable
+   card in the chat instead of being a file the user has to already know
+   exists and go find on the Files page. Deliberately NOT an inline
+   iframe -- real feedback live: a full page rendered at chat-bubble width
+   was too cramped to actually read. Clicking the chip opens the real
+   page in #preview-pane, a full-height side panel (see below), same
+   pattern #routines-pane already uses for "real estate this content
+   actually needs, not squeezed into the message column."
+   Two real CSS bugs fixed getting even the chip to render right: (1) a
+   single .preview-card class lost every property it shared with .msg.bot
+   (max-width/border/padding) -- same specificity, but .msg.bot is TWO
+   classes, so it always won regardless of source order; compounded onto
+   .msg.preview-card here to actually out-specificity it, matching how
+   .msg.user/.msg.bot already do it themselves. (2) overflow: hidden on a
+   flex item (#messages-pane is a column flex container) resolves that
+   item's automatic min-height to 0 per the flexbox spec's own
+   min-size-auto rule -- flex-shrink: 0 opts it out of that entirely. */
 .msg.preview-card {
-  max-width: 100%;
+  max-width: 320px;
   border: 1px solid var(--border);
   border-radius: 0.6rem;
   overflow: hidden;
   background: var(--popover);
   padding: 0;
   flex-shrink: 0;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
 }
+.msg.preview-card:hover { border-color: var(--primary); }
 .preview-card-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 0.6rem;
-  padding: 0.4rem 0.7rem;
-  border-bottom: 1px solid var(--border);
-  font-size: 0.78rem;
+  gap: 0.5rem;
+  padding: 0.6rem 0.75rem;
+  font-size: 0.82rem;
 }
+.preview-card-icon { flex-shrink: 0; color: var(--text-muted); }
 .preview-card-name {
-  color: var(--text-muted);
+  color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1;
 }
-.preview-card-open {
+.preview-card-hint {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  flex-shrink: 0;
+}
+
+/* Full-page preview side panel -- wider than #routines-pane on purpose,
+   this needs to actually show a rendered page, not a compact list. */
+#preview-pane {
+  width: 46%;
+  min-width: 420px;
+  border-left: 1px solid var(--border);
+  display: none;
+  flex-direction: column;
+}
+#preview-pane.open { display: flex; }
+#preview-header {
+  padding: 0.7rem 1.1rem;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.82rem;
+}
+#preview-header-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+#preview-header-open {
   color: var(--primary);
   text-decoration: none;
   flex-shrink: 0;
 }
-.preview-card-open:hover { text-decoration: underline; }
-.preview-card-frame {
-  display: block;
+#preview-header-open:hover { text-decoration: underline; }
+#preview-frame {
+  flex: 1;
   width: 100%;
-  height: 420px;
   border: none;
+  background: #fff;
+}
+#preview-image {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
   background: #fff;
 }
 
@@ -1005,11 +1048,13 @@ details.advanced summary { cursor: pointer; font-size: 0.82rem; color: var(--tex
   body.chat-open #sidebar { display: none; }
   #chat-back-btn { display: inline-flex; }
 
-  #routines-pane {
+  #routines-pane,
+  #preview-pane {
     position: fixed;
     inset: 0;
     width: 100%;
     max-width: none;
+    min-width: 0;
     z-index: 60;
     background: var(--bg);
   }

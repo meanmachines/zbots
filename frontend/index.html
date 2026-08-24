@@ -69,6 +69,15 @@
               <button type="submit" class="btn primary">Add routine</button>
             </form>
           </aside>
+          <aside id="preview-pane">
+            <div id="preview-header">
+              <span id="preview-header-name"></span>
+              <a id="preview-header-open" target="_blank" rel="noopener noreferrer">Open full size</a>
+              <button id="preview-close-btn" class="icon-btn" title="Close"></button>
+            </div>
+            <iframe id="preview-frame" sandbox="allow-scripts allow-forms"></iframe>
+            <img id="preview-image" alt="" style="display:none;" />
+          </aside>
         </div>
         <div id="composer-row">
           <textarea id="composer-input" placeholder="Message this bot (use @name in a group chat)"></textarea>

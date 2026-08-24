@@ -7,35 +7,59 @@ tagged on `main`.
 ## [Unreleased]
 
 ### Added
-- Inline live preview of a bot-generated HTML file (a landing page, any
-  page it builds) instead of a file the user has to already know exists
-  and go find on the Files page. Tool-agnostic by construction -- scans
-  every tool call's args, and separately the bot's own reply text, for a
-  string that looks like an .html/.htm path, rather than hardcoding one
-  tool name; any tool that touches a file path works automatically, no
-  allowlist to maintain. No new backend plumbing needed -- `GET
-  /files/read` already returns a `data_url` (`data:text/html;base64,...`)
-  for exactly this purpose. Rendered via a sandboxed iframe (`allow-
-  scripts allow-forms`, deliberately no `allow-same-origin`/`allow-
-  popups`/`allow-top-navigation` -- a `data:` URI iframe is already an
-  opaque origin the parent can't be reached from, this is defense in
-  depth against a generated page's own script trying to navigate the tab
-  or spawn windows). Detection runs against the bot's real persisted
-  history (not just the live SSE stream), so a preview survives a poll
-  reload or reopening an older conversation, not just the turn that
-  created it -- confirmed live against a landing page a bot had already
-  built earlier, with zero new messages sent. Cached client-side per path
-  after the first fetch so the 5s poll doesn't re-fetch an unchanged
-  file's base64 content on every tick.
-  - Two real CSS bugs found and fixed getting this to actually render:
+- Live preview of anything a bot generates -- HTML pages, images, icons,
+  SVGs -- in a dedicated side panel (`#preview-pane`), instead of a file
+  the user has to already know exists and go find on the Files page.
+  Tool-agnostic by construction: scans every tool call's args, and
+  separately the bot's own reply text, for a string that looks like a
+  previewable file path (`.html`/`.htm`/`.png`/`.jpg`/`.jpeg`/`.gif`/
+  `.svg`/`.webp`/`.ico`), rather than hardcoding one tool name -- any tool
+  that touches a file path works automatically, no allowlist to maintain.
+  Also understands hermes-agent's own real `MEDIA:<path>` tag convention
+  (`api_server.py`'s `_resolve_media_to_data_urls`) -- confirmed live that
+  tag only ever gets resolved to an inline image in the live SSE event at
+  generation time, never in what actually gets persisted to message
+  history, so a reopened conversation showed the literal unresolved
+  "MEDIA:/root/foo.png" text with no image at all; this pipeline picks up
+  the same tag and resolves it independently. No new backend plumbing
+  needed either way -- `GET /files/read` already returns a `data_url`
+  (`data:<mime>;base64,...`) for any file type, so the exact same fetch
+  serves both pages and images. Pages render in a sandboxed iframe
+  (`allow-scripts allow-forms`, deliberately no `allow-same-origin`/
+  `allow-popups`/`allow-top-navigation` -- a `data:` URI iframe is
+  already an opaque origin the parent can't be reached from, this is
+  defense in depth against a generated page's own script trying to
+  navigate the tab or spawn windows); images render in a plain `<img>`
+  for correct aspect-ratio sizing and native zoom/save behavior. A small
+  clickable chip in the chat (filename + type) opens the panel -- started
+  as a rendered-inline card, but real feedback live was that a full page
+  squeezed into chat-bubble width was unreadable and its own "open full
+  size" link unusable at that size, so the panel replaced it entirely.
+  Detection runs against the bot's real persisted history (not just the
+  live SSE stream), so a preview survives a poll reload or reopening an
+  older conversation, not just the turn that created it -- confirmed live
+  against several images and a landing page a bot had already built
+  earlier, with zero new messages sent. Cached client-side per path after
+  the first fetch so the 5s poll doesn't re-fetch an unchanged file's
+  base64 content on every tick.
+  - Three real bugs found and fixed getting this to actually work right:
     `.preview-card` (one class) lost every property it shared with
     `.msg.bot` (two classes, matching specificity beats source order) --
     fixed by compounding onto `.msg.preview-card` the way `.msg.user`/
-    `.msg.bot` already do it themselves. And `overflow: hidden` on a flex
+    `.msg.bot` already do it themselves. `overflow: hidden` on a flex
     item (`#messages-pane` is a column flex container) resolves that
     item's automatic min-height to 0 per the flexbox spec's own
     min-size-auto rule, collapsing the card to zero height around a
-    correctly-sized iframe -- fixed with `flex-shrink: 0`.
+    correctly-sized iframe -- fixed with `flex-shrink: 0`. And widening
+    the path-matching regex to cover image extensions also started
+    matching into remote image URLs mentioned elsewhere in an unrelated
+    conversation (a weather-icon CDN) and generic example paths
+    ("/path/to/image.png") -- a shared match-count budget across a whole
+    history scan meant those false positives could crowd out the real,
+    recent file before it was ever reached; fixed by requiring an actual
+    path separator and excluding ":" from the matchable characters (so
+    it can never match into an http(s):// scheme), plus raising the
+    history-scan budget well above the live-stream one.
 
 ### Fixed
 - `get_bot_messages()` merges every session in a bot's rollover family back
