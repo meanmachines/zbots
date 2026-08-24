@@ -1006,6 +1006,40 @@ function findPreviewPathsInHistory(rawRows) {
   return out;
 }
 
+// data: URIs work fine as an <iframe>/<img> src, but real bug found live:
+// clicking "Open full size" (an <a target="_blank" href="data:...">) did
+// nothing at all, silently -- Chrome (and other modern browsers) refuse
+// to open a data: URI as a new top-level tab, a deliberate anti-phishing
+// restriction (a data: page has no real address bar identity). A
+// same-origin blob: URL isn't subject to that restriction and opens
+// normally, so every consumer of a previewed file's bytes goes through
+// one here instead of the raw data_url -- including the iframe/img
+// themselves, for the same robustness (a blob avoids re-parsing a
+// megabytes-long base64 string as a URL, which some browsers cap).
+function dataUrlToBlobUrl(dataUrl) {
+  const commaIdx = dataUrl.indexOf(",");
+  const header = dataUrl.slice(0, commaIdx);
+  const mimeMatch = header.match(/^data:([^;]+);base64$/);
+  const mime = mimeMatch ? mimeMatch[1] : "application/octet-stream";
+  const binary = atob(dataUrl.slice(commaIdx + 1));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return URL.createObjectURL(new Blob([bytes], { type: mime }));
+}
+
+// Revoked on every new preview and on close -- a blob URL otherwise pins
+// its backing bytes in memory for the page's whole lifetime, and only
+// one preview is ever open at a time so there's never a reason to keep
+// more than the current one alive.
+let currentPreviewBlobUrl = null;
+
+function releaseCurrentPreviewBlobUrl() {
+  if (currentPreviewBlobUrl) {
+    URL.revokeObjectURL(currentPreviewBlobUrl);
+    currentPreviewBlobUrl = null;
+  }
+}
+
 // Opens the real file in the side panel (#preview-pane) -- real feedback
 // live: rendering a page (or an image) inline at chat-bubble width made
 // it unreadable, this needs its own real estate, same reasoning
@@ -1015,9 +1049,18 @@ function findPreviewPathsInHistory(rawRows) {
 // came back -- an <img> gives correct aspect-ratio sizing and native
 // zoom/save behavior that forcing an image through an iframe would not.
 function openPreviewPane(fileInfo, path) {
-  document.getElementById("preview-header-name").textContent = fileInfo.name || path;
+  const name = fileInfo.name || path;
+  document.getElementById("preview-header-name").textContent = name;
+  releaseCurrentPreviewBlobUrl();
+  const blobUrl = dataUrlToBlobUrl(fileInfo.data_url);
+  currentPreviewBlobUrl = blobUrl;
+
   const openLink = document.getElementById("preview-header-open");
-  openLink.href = fileInfo.data_url;
+  openLink.href = blobUrl;
+  const downloadLink = document.getElementById("preview-header-download");
+  downloadLink.href = blobUrl;
+  downloadLink.download = name;
+
   const isImage = (fileInfo.mime_type || "").startsWith("image/");
   const frame = document.getElementById("preview-frame");
   const img = document.getElementById("preview-image");
@@ -1025,13 +1068,13 @@ function openPreviewPane(fileInfo, path) {
     frame.style.display = "none";
     frame.src = "about:blank";
     img.style.display = "";
-    img.src = fileInfo.data_url;
-    img.alt = fileInfo.name || path;
+    img.src = blobUrl;
+    img.alt = name;
   } else {
     img.style.display = "none";
     img.src = "";
     frame.style.display = "";
-    frame.src = fileInfo.data_url;
+    frame.src = blobUrl;
   }
   document.getElementById("preview-pane").classList.add("open");
 }
@@ -1040,6 +1083,7 @@ document.getElementById("preview-close-btn").addEventListener("click", () => {
   document.getElementById("preview-pane").classList.remove("open");
   document.getElementById("preview-frame").src = "about:blank";
   document.getElementById("preview-image").src = "";
+  releaseCurrentPreviewBlobUrl();
 });
 
 async function appendPreviewCard(path) {
@@ -1768,6 +1812,7 @@ function populateIcons() {
   document.getElementById("chat-menu-btn").innerHTML = icon("more", 16);
   document.getElementById("routines-close-btn").innerHTML = icon("close", 15);
   document.getElementById("preview-close-btn").innerHTML = icon("close", 15);
+  document.getElementById("preview-header-download").innerHTML = icon("download", 15);
   document.getElementById("send-btn").innerHTML = icon("send", 15) + "<span>Send</span>";
   document.getElementById("main-empty-icon").innerHTML = icon("bots", 34);
 }

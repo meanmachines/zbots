@@ -6,7 +6,23 @@ tagged on `main`.
 
 ## [Unreleased]
 
+### Fixed
+- The preview panel's "Open full size" link silently did nothing when
+  clicked -- real bug found live: it pointed at the file's `data:` URI
+  directly with `target="_blank"`, and Chrome (and other modern browsers)
+  refuse to open a `data:` URI as a new top-level tab at all, a
+  deliberate anti-phishing restriction (a `data:` page has no real
+  address-bar identity to show). Fixed by converting the data URI to a
+  same-origin `blob:` URL client-side before handing it to the link (and
+  to the iframe/img themselves, for the same robustness -- a blob avoids
+  re-parsing a megabytes-long base64 string as a URL, which some browsers
+  cap). The previous blob is revoked on every new preview and on close so
+  it doesn't pin memory for the page's whole lifetime.
+
 ### Added
+- A download button next to "Open full size" in the preview panel,
+  reusing the same blob URL with a real filename via the `download`
+  attribute -- works for both pages and images.
 - Live preview of anything a bot generates -- HTML pages, images, icons,
   SVGs -- in a dedicated side panel (`#preview-pane`), instead of a file
   the user has to already know exists and go find on the Files page.
