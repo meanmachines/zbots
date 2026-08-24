@@ -95,7 +95,16 @@ RESPONSE_STYLE = (
     "next to it, since the destination page itself almost always covers "
     "those inline once the user is there. Only send a second link later, "
     "when it's a genuinely different destination the user needs next (like "
-    "the real approval/consent URL once setup is done)."
+    "the real approval/consent URL once setup is done).\n\n"
+    "When the user asks for real coding or software-development work -- "
+    "writing, refactoring, or debugging actual code in a repo, not just "
+    "explaining a concept or answering a question about code -- hand it off "
+    "instead of doing it yourself: use your message_bot tool to send bot "
+    "name \"coder\" the task, in enough detail for it to act (repo/workdir, "
+    "what's needed, any constraints). \"Coder\" runs real external coding-"
+    "agent CLIs (OpenCode, Qwen Code) against a dedicated coding model and "
+    "reports back concrete results. Relay its reply to the user rather than "
+    "re-describing the task in your own words."
 )
 
 DEFAULT_SOUL = (

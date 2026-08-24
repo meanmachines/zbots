@@ -6,6 +6,20 @@ tagged on `main`.
 
 ## [Unreleased]
 
+### Added
+- Coding tasks now get delegated to a dedicated "coder" bot instead of
+  handled inline: the shared RESPONSE_STYLE guardrail (`persona.py`) tells
+  every bot to hand off real coding/development work via `message_bot`
+  rather than attempting it in its own context. "coder" runs OpenCode
+  and Qwen Code -- real external CLI coding agents, already supported by
+  hermes-agent's own `opencode` skill -- against a dedicated Qwen3.8-27B
+  instance on the Thor GPU box (256K context, the model's real max --
+  no variant of this checkpoint supports the 1M figure that was asked
+  for). Both CLIs and Node 22 (Debian's own nodejs/npm package is one
+  major behind Qwen Code's declared minimum) are now baked into the
+  Dockerfile so a fresh deploy has them from first boot, not just after
+  a live install a redeploy would lose.
+
 ### Fixed
 - Routines silently went nowhere. `create_routine` hardcoded
   `deliver: "local"`, which runs a routine's prompt in its own private

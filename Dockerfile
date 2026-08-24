@@ -14,7 +14,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         nginx \
         apache2-utils \
         curl \
+        gnupg \
     && rm -rf /var/lib/apt/lists/*
+
+# Debian's own nodejs/npm packages are Node 20, one major behind what
+# @qwen-code/qwen-code declares as its minimum engine (>=22) -- it still
+# runs under 20 but prints an EBADENGINE warning on every invocation, noisy
+# for something a bot shells out to constantly. NodeSource's own Node 22
+# repo instead.
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# OpenCode and Qwen Code CLIs -- real, already-supported delegate-to-
+# external-coding-agent mechanisms, invoked via the terminal tool exactly
+# like any other shell command (OpenCode has its own skill,
+# skills/autonomous-ai-agents/opencode/SKILL.md; Qwen Code is the same
+# pattern, no bundled skill yet). Installed at image-build time so a
+# coding-delegate bot has both on first boot instead of only after a live
+# install that a later redeploy would silently lose.
+RUN npm install -g opencode-ai@latest @qwen-code/qwen-code@latest
 
 WORKDIR /opt/zbots
 COPY vendor/ /opt/zbots/vendor/
