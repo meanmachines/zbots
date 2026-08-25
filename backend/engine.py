@@ -453,7 +453,7 @@ async def _create_bot_session(profile: str, title: str, headers: dict) -> str:
 
 
 async def _ensure_bot_chat_session(
-    profile: str, headers: dict, active_session_id: Optional[str]
+    profile: str, headers: dict, active_session_id: Optional[str], *, force_new: bool = False
 ) -> tuple[str, list[dict]]:
     """Return (this bot's current/active session id, all of its sessions).
 
@@ -461,14 +461,34 @@ async def _ensure_bot_chat_session(
     after a rollover) over a fresh title search, so a rollover doesn't get
     silently "found" and reused again next call -- only used to bootstrap
     the very first session, or to recover if state was lost.
+
+    Real bug found live: passing `active_session_id=None` alone does NOT
+    get a fresh session once ANY session already exists for this profile --
+    the fallback below finds and reuses `all_sessions[-1]` (a title-family
+    search, unrelated to whatever active_session_id was), which is exactly
+    right for "state was lost, recover the real session" but is the
+    opposite of what a `task`-category bot needs (main.py's send_to_bot/
+    stream_to_bot originally passed `active_session_id=None` for a task
+    bot expecting this to always create fresh -- confirmed live it didn't:
+    a second message landed back on the same reused session, and the
+    "secret" from message 1 came right back in message 2's reply). `force_new`
+    is the explicit signal that was actually missing: skip both lookups
+    unconditionally and start a new session, numbered into the SAME title
+    family (via `_roll_over_bot_session`) so it still merges into the bot's
+    one continuous visible thread -- only the MODEL's own context is
+    isolated, not the user-visible history.
     """
     all_sessions = await _list_bot_sessions(profile, headers)
-    if active_session_id and any(s.get("id") == active_session_id for s in all_sessions):
-        return active_session_id, all_sessions
-    if all_sessions:
-        return str(all_sessions[-1]["id"]), all_sessions
-    session_id = await _create_bot_session(profile, _bot_chat_title(profile), headers)
-    return session_id, [{"id": session_id}]
+    if not force_new:
+        if active_session_id and any(s.get("id") == active_session_id for s in all_sessions):
+            return active_session_id, all_sessions
+        if all_sessions:
+            return str(all_sessions[-1]["id"]), all_sessions
+    if not all_sessions:
+        session_id = await _create_bot_session(profile, _bot_chat_title(profile), headers)
+        return session_id, [{"id": session_id}]
+    session_id = await _roll_over_bot_session(profile, headers, all_sessions)
+    return session_id, all_sessions + [{"id": session_id, "title": _bot_chat_title(profile, 1 + max((_bot_session_rollover_n(s.get("title"), profile) or 0) for s in all_sessions))}]
 
 
 async def _roll_over_bot_session(profile: str, headers: dict, all_sessions: list[dict]) -> str:
@@ -589,7 +609,12 @@ async def _context_bridge_note(profile: str, old_session_id: str, headers: dict)
 
 
 async def send_to_bot(
-    profile: str, message: str, api_server_key: str, active_session_id: Optional[str]
+    profile: str,
+    message: str,
+    api_server_key: str,
+    active_session_id: Optional[str],
+    *,
+    force_new_session: bool = False,
 ) -> tuple[str, str]:
     """Send one message to a bot's active session; return (reply_text, session_id).
 
@@ -602,9 +627,17 @@ async def send_to_bot(
     rollover back into one continuous thread, so retrying under the hood
     is invisible to the user beyond the reply arriving from a "new"
     session.
+
+    force_new_session: for a `task`-category bot (main.py's own concept,
+    not passed here as anything but this explicit flag) -- see
+    _ensure_bot_chat_session's own docstring for the real bug this fixes:
+    passing active_session_id=None alone does NOT get a fresh session once
+    one already exists.
     """
     headers = _api_headers(api_server_key)
-    session_id, all_sessions = await _ensure_bot_chat_session(profile, headers, active_session_id)
+    session_id, all_sessions = await _ensure_bot_chat_session(
+        profile, headers, active_session_id, force_new=force_new_session
+    )
 
     async def _chat(sid: str, msg: Optional[str] = None) -> tuple[int, Optional[dict]]:
         with _profile_scope(profile):
@@ -922,7 +955,12 @@ async def _run_stream_attempt_embedded(profile: str, session_id: str, message: s
 
 
 async def stream_to_bot(
-    profile: str, message: str, api_server_key: str, active_session_id: Optional[str]
+    profile: str,
+    message: str,
+    api_server_key: str,
+    active_session_id: Optional[str],
+    *,
+    force_new_session: bool = False,
 ) -> tuple[dict, Any]:
     """Real per-token streaming: return (session_state, async_iterator_of_sse_bytes).
 
@@ -930,7 +968,8 @@ async def stream_to_bot(
     AFTER fully draining the iterator (not before -- a rollover mid-stream,
     see below, can change which session actually ended up serving the
     reply). Session lookup/creation mirrors send_to_bot()'s own
-    _ensure_bot_chat_session call.
+    _ensure_bot_chat_session call. force_new_session: see send_to_bot()'s
+    own docstring -- same real bug, same fix, applied here too.
 
     Real bug found live, and this is the fix: a session's SECOND message
     onward reliably fails with `event: error` / "No LLM provider
@@ -969,7 +1008,9 @@ async def stream_to_bot(
     consistent with it instead of inventing a second mechanism.
     """
     headers = _api_headers(api_server_key)
-    session_id, all_sessions = await _ensure_bot_chat_session(profile, headers, active_session_id)
+    session_id, all_sessions = await _ensure_bot_chat_session(
+        profile, headers, active_session_id, force_new=force_new_session
+    )
     state = {"session_id": session_id}
 
     # Real bug found live, right after the frontend started rendering

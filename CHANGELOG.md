@@ -101,12 +101,30 @@ tagged on `main`.
     `default` and any bot with an enabled routine (kept as an additional
     signal, not replaced). `task` and `general` bots stay on-demand,
     30-minute idle-reaped as before.
-  - `task` bots get a fresh session on every call
-    (`send_to_bot`/`stream_to_bot` pass no stored session id for them) --
-    a one-off request has no business remembering a previous unrelated ask.
-    The old session is never deleted, same convention as a rollover --
-    history stays real and readable, a `task` bot just never reads its own
-    past history back into context.
+  - `task` bots get a fresh session on every call -- a one-off request has
+    no business remembering a previous unrelated ask. The old session is
+    never deleted, same convention as a rollover -- history stays real and
+    readable, a `task` bot just never reads its own past history back into
+    context.
+    - Real bug found live during end-to-end verification: the first cut of
+      this just passed `active_session_id=None` to `send_to_bot`/
+      `stream_to_bot`, on the assumption that `_ensure_bot_chat_session`'s
+      "no active session id" path always creates a new session. It
+      doesn't -- once ANY session already exists for the profile, that
+      path's own fallback reuses `all_sessions[-1]` (a title-family
+      search meant for "state was lost, recover the real session"),
+      regardless of what active_session_id was. Confirmed live: told a
+      task bot a secret in message 1, then asked "what was the secret
+      code I just gave you?" in message 2 -- it answered correctly, which
+      it should never have been able to do. Fixed with an explicit
+      `force_new` parameter on `_ensure_bot_chat_session` (and
+      `force_new_session` threaded through `send_to_bot`/`stream_to_bot`)
+      that skips the reuse fallback unconditionally and starts a genuinely
+      new session, still numbered into the bot's own title family (so it
+      still merges into one continuous visible thread -- only the MODEL's
+      own context is isolated, not the user-visible history). Re-verified
+      live after the fix: the same two-message exchange no longer recalls
+      the secret. Covered by new `test_engine_sessions.py` (6 tests).
   - New `POST /bots/{name}/wake`: opportunistic pre-warm, best-effort
     (never a visible failure) -- fired by the frontend the moment a bot's
     chat is opened (`selectBot()`), in parallel with loading its message

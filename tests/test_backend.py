@@ -559,9 +559,16 @@ def test_send_to_bot_skips_state_write_when_session_id_unchanged(monkeypatch, st
 # ---------------------------------------------------------------------------
 # task-category bots -- deliberately stateless. Real design point: a task
 # bot has no business remembering a previous unrelated ask, so every call
-# ignores whatever session id is on record and always starts fresh
-# (_ensure_bot_chat_session's own unchanged "no active session id ->
-# create new" path does the rest).
+# ignores whatever session id is on record and always starts fresh.
+#
+# Real bug found live (see engine.py's _ensure_bot_chat_session /
+# force_new_session docstrings): passing active_session_id=None alone does
+# NOT get a fresh session once one already exists -- a second message to a
+# live task bot landed back on the FIRST message's own session, and a
+# "secret" told to it in message 1 came right back in message 2's reply.
+# force_new_session=True is the actual fix; these tests assert BOTH that
+# active_session_id is ignored (still None) AND that force_new_session is
+# the True/False signal doing the real work.
 # ---------------------------------------------------------------------------
 
 def test_send_to_bot_ignores_the_stored_session_for_a_task_bot(monkeypatch, state_file):
@@ -572,7 +579,9 @@ def test_send_to_bot_ignores_the_stored_session_for_a_task_bot(monkeypatch, stat
     asyncio.run(m.send_to_bot("quick-answers", "hello"))
 
     call_args = fake_engine_send.await_args.args
+    call_kwargs = fake_engine_send.await_args.kwargs
     assert call_args[3] is None  # active_session_id passed as None despite the stored "old-sid"
+    assert call_kwargs["force_new_session"] is True
 
 
 def test_send_to_bot_still_uses_the_stored_session_for_a_non_task_bot(monkeypatch, state_file):
@@ -583,14 +592,18 @@ def test_send_to_bot_still_uses_the_stored_session_for_a_non_task_bot(monkeypatc
     asyncio.run(m.send_to_bot("butler", "hello"))
 
     call_args = fake_engine_send.await_args.args
+    call_kwargs = fake_engine_send.await_args.kwargs
     assert call_args[3] == "old-sid"
+    assert call_kwargs["force_new_session"] is False
 
 
 def test_stream_to_bot_ignores_the_stored_session_for_a_task_bot(monkeypatch, state_file):
     m._write_state({**m._default_state(), "active_sessions": {"quick-answers": "old-sid"}, "categories": {"quick-answers": "task"}})
+    seen = {}
 
-    async def fake_engine_stream(profile, message, api_key, active_session_id):
-        assert active_session_id is None
+    async def fake_engine_stream(profile, message, api_key, active_session_id, force_new_session=False):
+        seen["active_session_id"] = active_session_id
+        seen["force_new_session"] = force_new_session
         return {"session_id": "new-sid"}, _empty_async_iter()
 
     monkeypatch.setattr(m._engine, "stream_to_bot", fake_engine_stream)
@@ -600,6 +613,7 @@ def test_stream_to_bot_ignores_the_stored_session_for_a_task_bot(monkeypatch, st
             pass
 
     asyncio.run(drain())
+    assert seen == {"active_session_id": None, "force_new_session": True}
 
 
 async def _empty_async_iter():

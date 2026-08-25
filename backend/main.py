@@ -509,15 +509,23 @@ async def send_to_bot(profile: str, message: str, *, timeout: float = 300.0) -> 
     if _engine._use_http():
         await bot_processes.ensure_bot_process_running(profile)
     state = _read_state()
-    # task-category bots are deliberately stateless -- ignoring whatever
-    # session id is on record and always starting fresh is the whole
-    # point (a task bot has no business remembering a previous unrelated
-    # ask). _ensure_bot_chat_session's own "no active session id -> create
-    # a new one" path (unchanged) does the rest; the old session is never
-    # deleted, same convention as a rollover -- it just never gets read
-    # back into context again.
-    active_id = None if _is_task_category(state, profile) else (state.get("active_sessions") or {}).get(profile)
-    reply, session_id = await _engine.send_to_bot(profile, message, API_SERVER_KEY, active_id)
+    # task-category bots are deliberately stateless -- always starting
+    # fresh is the whole point (a task bot has no business remembering a
+    # previous unrelated ask). Real bug found live: passing
+    # active_session_id=None alone does NOT achieve this once the bot has
+    # any prior session -- _ensure_bot_chat_session's own fallback reuses
+    # the latest one by title-family search, so a second message landed
+    # back on the FIRST message's own session (confirmed live: asking a
+    # task bot to recall something told to it the message before
+    # succeeded, when it should have had no memory of it at all).
+    # force_new_session is the real fix -- see its own docstring in
+    # engine.py. The old session is never deleted, same convention as a
+    # rollover -- it just never gets read back into context again.
+    is_task = _is_task_category(state, profile)
+    active_id = None if is_task else (state.get("active_sessions") or {}).get(profile)
+    reply, session_id = await _engine.send_to_bot(
+        profile, message, API_SERVER_KEY, active_id, force_new_session=is_task
+    )
     if session_id != active_id:
         await _mutate_state(lambda d: d.setdefault("active_sessions", {}).__setitem__(profile, session_id))
     return reply
@@ -539,10 +547,14 @@ async def stream_to_bot(profile: str, message: str):
     if _engine._use_http():
         await bot_processes.ensure_bot_process_running(profile)
     state = _read_state()
-    # See send_to_bot's own comment on _is_task_category -- same
-    # deliberate statelessness, applied to the streaming path.
-    active_id = None if _is_task_category(state, profile) else (state.get("active_sessions") or {}).get(profile)
-    session_state, chunks = await _engine.stream_to_bot(profile, message, API_SERVER_KEY, active_id)
+    # See send_to_bot's own comment on _is_task_category and
+    # force_new_session -- same deliberate statelessness, same real fix,
+    # applied to the streaming path.
+    is_task = _is_task_category(state, profile)
+    active_id = None if is_task else (state.get("active_sessions") or {}).get(profile)
+    session_state, chunks = await _engine.stream_to_bot(
+        profile, message, API_SERVER_KEY, active_id, force_new_session=is_task
+    )
     async for chunk in chunks:
         yield chunk
     final_session_id = session_state["session_id"]

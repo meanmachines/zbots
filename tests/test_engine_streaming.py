@@ -162,7 +162,7 @@ def _drain(monkeypatch, attempts):
     return asyncio.run(_run())
 
 
-async def _fake_ensure_session(profile, headers, active_session_id):
+async def _fake_ensure_session(profile, headers, active_session_id, force_new=False):
     return "session-1", [{"id": "session-1"}]
 
 
@@ -367,7 +367,7 @@ def test_send_to_bot_prepends_the_note_to_the_retried_message(monkeypatch):
     # actually exercises is mocked below regardless of transport.
     monkeypatch.setattr(engine, "_CHAT_TRANSPORT", "http")
 
-    async def fake_ensure_session(profile, headers, active_session_id):
+    async def fake_ensure_session(profile, headers, active_session_id, force_new=False):
         return "sid-1", [{"id": "sid-1"}]
 
     async def fake_roll_over(profile, headers, all_sessions):
