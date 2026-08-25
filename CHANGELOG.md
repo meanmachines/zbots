@@ -167,6 +167,26 @@ tagged on `main`.
   the required upstream attribution in `README.md`/
   `THIRD_PARTY_LICENSES.md`/`docs/CREDITS.md` were left alone (accurate
   technical documentation and license compliance, not user-facing leaks).
+  - A much bigger version of the same bug, found immediately after live-
+    verifying the five above: `/connectors`, `/skills`, `/mcp/catalog`, and
+    `/plugins` are all thin `dash_get` proxies of hermes-agent's own native
+    dashboard API (same convention as everywhere else in `main.py`), and
+    hermes-agent's own response text for these -- `description`/`prompt`/
+    `help`/`name` fields -- carries its own branding verbatim. Confirmed
+    live against the deployed app: 27 of 33 connector platforms ("Connect
+    Hermes to Discord DMs...", "Use Hermes from Slack via Socket Mode...")
+    and 46 separate mentions inside the MCP catalog's own per-integration
+    setup text alone. `redact_branding_leaks` only ever ran on a bot's own
+    chat reply (`engine.py`'s `send_to_bot`) -- nothing scrubbed these
+    admin-facing config-proxy responses. Fixed with a new
+    `persona.scrub_branding_deep()`: recursively applies the same regex
+    scrub to every string in a JSON-shaped dict/list, wired into all four
+    endpoints. `docs_url` fields are deliberately excluded -- they're real,
+    working links to hermes-agent's own setup docs (e.g. how to get a
+    Discord bot token); scrubbing "hermes-agent" out of
+    "hermes-agent.nousresearch.com" would silently break the domain rather
+    than remove a leak. Covered by 6 new tests in `test_persona.py` and 5
+    endpoint-level tests in `test_backend.py`.
 - Real bug found live: a resilience-triggered rollover (see the
   `gateway.multiplex_profiles`/provider-scoping fixes above for the two
   other real bugs this session's rollover logic already recovers from)

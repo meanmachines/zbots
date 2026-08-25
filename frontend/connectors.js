@@ -34,9 +34,14 @@ async function loadConnectors() {
     if (platforms.length && platforms.every((p) => !p.gateway_running)) {
       notice.style.display = "";
       notice.className = "empty-state";
+      // Real bug found live: res.gateway_start_command is hermes-agent's
+      // own native display string (a raw CLI command like "hermes gateway
+      // start") -- a zBots admin has no CLI access to the container to run
+      // it, and it leaks upstream branding into zBots' own UI. Ignored on
+      // purpose; the System page's restart control is the real, actionable
+      // fix available here.
       notice.textContent =
-        "The messaging gateway isn't running, so connectors can be configured here but won't actually connect yet. Ask an admin to start it (" +
-        (res.gateway_start_command || "restart it from the System page") + ").";
+        "The messaging gateway isn't running, so connectors can be configured here but won't actually connect yet. Ask an admin to restart it from the System page.";
     }
     list.innerHTML = "";
     if (!platforms.length) {

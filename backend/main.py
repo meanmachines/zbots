@@ -278,6 +278,11 @@ try:
 except ImportError:
     import push
 
+try:
+    from . import persona
+except ImportError:
+    import persona
+
 # asyncio.create_task()'s own docs warn that a task with no strong
 # reference held elsewhere can be garbage-collected mid-flight -- this
 # set is that reference, with a done-callback to stop holding it once it
@@ -1619,7 +1624,11 @@ class ConnectorUpdate(BaseModel):
 
 @app.get("/connectors")
 async def list_connectors() -> Any:
-    return await dash_get("/api/messaging/platforms")
+    # scrub_branding_deep: hermes-agent's own native platform metadata
+    # (description/prompt/help text) carries its own branding verbatim --
+    # see persona.py's own comment on this function for how that was
+    # found and why docs_url is deliberately left untouched.
+    return persona.scrub_branding_deep(await dash_get("/api/messaging/platforms"))
 
 
 @app.put("/connectors/{platform_id}")
@@ -1728,7 +1737,10 @@ async def set_mcp_server_enabled(name: str, body: ToggleBody) -> dict:
 
 @app.get("/mcp/catalog")
 async def get_mcp_catalog() -> Any:
-    return await dash_get("/api/mcp/catalog")
+    # See list_connectors' own comment on scrub_branding_deep -- same real
+    # bug, same fix (the catalog's own per-integration setup text is the
+    # single biggest source of it: 46 mentions across this one response).
+    return persona.scrub_branding_deep(await dash_get("/api/mcp/catalog"))
 
 
 class CatalogInstall(BaseModel):
@@ -1766,7 +1778,10 @@ async def cancel_mcp_oauth_flow(flow_id: str) -> dict:
 
 @app.get("/skills")
 async def list_skills() -> Any:
-    return await dash_get("/api/skills")
+    # See list_connectors' own comment on scrub_branding_deep -- the
+    # bundled "hermes-agent"/"hermes-agent-skill-authoring" skill entries
+    # carry their own names/descriptions verbatim otherwise.
+    return persona.scrub_branding_deep(await dash_get("/api/skills"))
 
 
 class SkillToggleBody(BaseModel):
@@ -1861,7 +1876,10 @@ async def run_cron_job(job_id: str) -> dict:
 
 @app.get("/plugins")
 async def list_plugins() -> Any:
-    return await dash_get("/api/dashboard/plugins")
+    # See list_connectors' own comment on scrub_branding_deep -- read-only
+    # display (no PUT here), so scrubbing the "hermes-achievements" plugin
+    # entry's own name/description can't break a round-trip toggle action.
+    return persona.scrub_branding_deep(await dash_get("/api/dashboard/plugins"))
 
 
 # --------------------------------------------------------------------------

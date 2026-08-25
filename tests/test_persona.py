@@ -98,3 +98,47 @@ def test_redacts_case_insensitively():
 def test_redacts_home_directory_path():
     result = persona.redact_branding_leaks("config lives at ~/.hermes/config.yaml")
     assert "~/.hermes" not in result
+
+
+# ---------------------------------------------------------------------------
+# scrub_branding_deep -- the same backstop applied to hermes-agent's own
+# native dashboard-API responses proxied straight through by main.py's
+# /connectors, /skills, /mcp/catalog, /plugins (a real audit found 27 of 33
+# connector platforms, plus skills/catalog/plugin entries, carrying
+# hermes-agent's own description/prompt/help text verbatim -- see this
+# function's own comment in persona.py for the incident).
+# ---------------------------------------------------------------------------
+
+def test_scrub_branding_deep_redacts_a_string_value_in_a_dict():
+    data = {"name": "Discord", "description": "Connect Hermes to Discord DMs."}
+    result = persona.scrub_branding_deep(data)
+    assert "Hermes" not in result["description"]
+    assert result["name"] == "Discord"
+
+
+def test_scrub_branding_deep_recurses_into_nested_lists_and_dicts():
+    data = {"platforms": [{"description": "Use Hermes via Matrix."}, {"description": "clean"}]}
+    result = persona.scrub_branding_deep(data)
+    assert "Hermes" not in result["platforms"][0]["description"]
+    assert result["platforms"][1]["description"] == "clean"
+
+
+def test_scrub_branding_deep_leaves_docs_url_untouched():
+    # Real reason this exists: scrubbing "hermes-agent" out of
+    # "hermes-agent.nousresearch.com" would silently turn a working setup
+    # doc link into a broken domain -- worse than leaving the real one.
+    data = {"docs_url": "https://hermes-agent.nousresearch.com/docs/x", "description": "Use Hermes."}
+    result = persona.scrub_branding_deep(data)
+    assert result["docs_url"] == "https://hermes-agent.nousresearch.com/docs/x"
+    assert "Hermes" not in result["description"]
+
+
+def test_scrub_branding_deep_passes_through_non_string_scalars():
+    data = {"enabled": True, "count": 3, "note": None}
+    assert persona.scrub_branding_deep(data) == data
+
+
+def test_scrub_branding_deep_handles_a_bare_list():
+    result = persona.scrub_branding_deep(["Use Hermes here.", "clean"])
+    assert "Hermes" not in result[0]
+    assert result[1] == "clean"

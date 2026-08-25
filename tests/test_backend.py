@@ -1346,3 +1346,61 @@ def test_wake_never_fails_the_request_when_the_worker_fails_to_start(client, mon
     resp = client.post("/bots/alpha/wake")
     assert resp.status_code == 200
     assert resp.json() == {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Branding scrub on hermes-agent's own native dashboard-API proxies.
+# Real bug found live: /connectors, /skills, /mcp/catalog, /plugins are all
+# thin dash_get passthroughs (same convention as everywhere else in this
+# file), and hermes-agent's own response text for these carries its own
+# branding verbatim -- 27 of 33 connector platforms alone, confirmed live
+# against the deployed app. persona.scrub_branding_deep is the fix; these
+# confirm it's actually wired into each of the four endpoints, not just
+# that the helper itself works (already covered in test_persona.py).
+# ---------------------------------------------------------------------------
+
+def test_connectors_endpoint_scrubs_platform_descriptions(client, monkeypatch):
+    monkeypatch.setattr(
+        m,
+        "dash_get",
+        AsyncMock(return_value={"platforms": [{"name": "Discord", "description": "Connect Hermes to Discord."}]}),
+    )
+    body = client.get("/connectors").json()
+    assert "Hermes" not in body["platforms"][0]["description"]
+
+
+def test_skills_endpoint_scrubs_skill_descriptions(client, monkeypatch):
+    monkeypatch.setattr(
+        m, "dash_get", AsyncMock(return_value=[{"name": "hermes-agent", "description": "Use Hermes Agent."}])
+    )
+    body = client.get("/skills").json()
+    assert "Hermes" not in body[0]["description"]
+
+
+def test_mcp_catalog_endpoint_scrubs_integration_help_text(client, monkeypatch):
+    monkeypatch.setattr(
+        m, "dash_get", AsyncMock(return_value={"integrations": [{"help": "On first connection Hermes opens..."}]})
+    )
+    body = client.get("/mcp/catalog").json()
+    assert "Hermes" not in body["integrations"][0]["help"]
+
+
+def test_plugins_endpoint_scrubs_plugin_names_and_descriptions(client, monkeypatch):
+    monkeypatch.setattr(
+        m,
+        "dash_get",
+        AsyncMock(return_value=[{"name": "hermes-achievements", "description": "Vibe coding and agentic Hermes workflows."}]),
+    )
+    body = client.get("/plugins").json()
+    assert body[0]["name"] == "zBots-achievements"
+    assert "Hermes" not in body[0]["description"]
+
+
+def test_mcp_catalog_endpoint_leaves_docs_url_untouched(client, monkeypatch):
+    monkeypatch.setattr(
+        m,
+        "dash_get",
+        AsyncMock(return_value={"integrations": [{"docs_url": "https://hermes-agent.nousresearch.com/docs/x"}]}),
+    )
+    body = client.get("/mcp/catalog").json()
+    assert body["integrations"][0]["docs_url"] == "https://hermes-agent.nousresearch.com/docs/x"

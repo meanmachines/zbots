@@ -144,3 +144,40 @@ def redact_branding_leaks(reply: str) -> str:
     for pattern, replacement in _LEAK_PATTERNS:
         reply = pattern.sub(replacement, reply)
     return reply
+
+
+# Real bug found live: a full audit of zBots' own dashboard-config proxy
+# endpoints (Connectors, Skills, MCP catalog, Plugins -- every one of them
+# a thin pass-through of hermes-agent's own native "/api/..." response,
+# same as everything else in main.py's dash_get/dash_send convention)
+# turned up 27 of 33 connector platforms, plus skills/catalog/plugin
+# entries, carrying hermes-agent's own native description/prompt/help text
+# verbatim -- e.g. "Connect Hermes to Discord DMs..." rendered as-is on
+# zBots' own Connectors page. redact_branding_leaks above only ever ran on
+# a bot's own CHAT REPLY (engine.py's send_to_bot); nothing scrubbed these
+# admin-facing config-proxy responses, so they'd slipped past every check
+# until this pass. _DEEP_SKIP_KEYS excludes docs_url specifically: it's a
+# real, working link to hermes-agent's own setup documentation (e.g. how
+# to get a Discord bot token) -- scrubbing "hermes-agent" out of
+# "hermes-agent.nousresearch.com" would silently turn a working link into
+# a broken domain, worse than leaving the real one in place.
+_DEEP_SKIP_KEYS = {"docs_url"}
+
+
+def scrub_branding_deep(obj, *, _skip_keys=_DEEP_SKIP_KEYS):
+    """Recursively apply redact_branding_leaks to every string value in a
+    JSON-shaped dict/list (as returned by hermes-agent's own dashboard
+    API) -- for admin-facing config/catalog responses proxied straight
+    through, not chat replies (see redact_branding_leaks for that path).
+    Keys in _skip_keys are passed through untouched (see its own comment).
+    """
+    if isinstance(obj, str):
+        return redact_branding_leaks(obj)
+    if isinstance(obj, dict):
+        return {
+            k: (v if k in _skip_keys else scrub_branding_deep(v, _skip_keys=_skip_keys))
+            for k, v in obj.items()
+        }
+    if isinstance(obj, list):
+        return [scrub_branding_deep(v, _skip_keys=_skip_keys) for v in obj]
+    return obj
