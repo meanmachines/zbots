@@ -197,6 +197,134 @@ def test_get_bot_soul(client, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# _sync_profile_provider -- real bug found live (Phase 1 http-transport
+# testing, see the project plan): under gateway.multiplex_profiles, a
+# secondary profile's own config.yaml never inherits the default profile's
+# providers: block, only a model: reference to a provider name only the
+# default profile actually defines. Worked by accident under the embedded
+# chat transport (one shared adapter built from the default profile's
+# config, reused regardless of scope); the real gateway (http transport)
+# resolves providers strictly per-profile and 404s with "Unknown provider"
+# for any bot whose own config never got the definition copied in.
+# ---------------------------------------------------------------------------
+
+def test_sync_profile_provider_copies_the_real_definition_into_the_profile(monkeypatch):
+    calls = []
+
+    async def fake_dash_get(path, **kwargs):
+        assert path == "/api/config"
+        return {"providers": {"sglang-thor": {"base_url": "http://thor:30000/v1", "model": "qwen3.8-27b"}}}
+
+    async def fake_dash_send(method, path, body=None, query=None):
+        calls.append((method, path, body, query))
+        return {}
+
+    monkeypatch.setattr(m, "dash_get", fake_dash_get)
+    monkeypatch.setattr(m, "dash_send", fake_dash_send)
+
+    asyncio.run(m._sync_profile_provider("coder", "sglang-thor"))
+
+    assert len(calls) == 1
+    method, path, body, query = calls[0]
+    assert method == "PUT"
+    assert path == "/api/config"
+    assert body == {"config": {"providers": {"sglang-thor": {"base_url": "http://thor:30000/v1", "model": "qwen3.8-27b"}}}}
+    assert query == {"profile": "coder"}
+
+
+def test_sync_profile_provider_skips_reserved_builtin_providers(monkeypatch):
+    # openrouter/auto/custom (and every hermes-agent-recognized built-in
+    # name) resolve through native code paths and env-var keys, not a
+    # providers: entry -- nothing to copy, and _reserved_provider_ids
+    # itself is what create_bot/update_bot already use to refuse letting a
+    # user name a custom endpoint one of these in the first place.
+    dash_get_called = []
+    monkeypatch.setattr(m, "dash_get", AsyncMock(side_effect=lambda *a, **k: dash_get_called.append(1)))
+    monkeypatch.setattr(m, "_reserved_provider_ids", lambda: frozenset({"openrouter", "auto", "custom"}))
+
+    asyncio.run(m._sync_profile_provider("default", "openrouter"))
+    assert dash_get_called == []
+
+
+def test_sync_profile_provider_is_a_noop_with_no_provider(monkeypatch):
+    dash_get_called = []
+    monkeypatch.setattr(m, "dash_get", AsyncMock(side_effect=lambda *a, **k: dash_get_called.append(1)))
+    asyncio.run(m._sync_profile_provider("default", None))
+    assert dash_get_called == []
+
+
+def test_sync_profile_provider_is_best_effort_on_a_missing_catalog_entry(monkeypatch):
+    # The default profile's own config not having the provider shouldn't
+    # happen (see this function's own docstring) but must not raise --
+    # bot creation/update already succeeded by the time this runs.
+    async def fake_dash_get(path, **kwargs):
+        return {"providers": {}}
+
+    send_calls = []
+    monkeypatch.setattr(m, "dash_get", fake_dash_get)
+    monkeypatch.setattr(m, "dash_send", AsyncMock(side_effect=lambda *a, **k: send_calls.append(1)))
+
+    asyncio.run(m._sync_profile_provider("coder", "sglang-thor"))
+    assert send_calls == []
+
+
+def test_sync_profile_provider_swallows_a_dashboard_failure(monkeypatch):
+    # Best-effort: a transport failure here must not propagate and fail
+    # the bot creation/update request it's called from.
+    async def boom(path, **kwargs):
+        raise m.httpx.ConnectError("no route")
+
+    monkeypatch.setattr(m, "dash_get", boom)
+    asyncio.run(m._sync_profile_provider("coder", "sglang-thor"))  # must not raise
+
+
+def test_create_bot_syncs_the_provider_into_the_new_profile(client, monkeypatch):
+    sync_calls = []
+
+    async def fake_dash_send(method, path, body=None, query=None):
+        return {}
+
+    async def fake_default_model():
+        return "default-prov", "default-model"
+
+    async def fake_get_roster(include_hidden=False):
+        return [m.RosterEntry(name="alpha", title="Alpha", description="", provider="prov-a", model="model-a")]
+
+    async def fake_sync(profile, provider):
+        sync_calls.append((profile, provider))
+
+    monkeypatch.setattr(m, "dash_send", fake_dash_send)
+    monkeypatch.setattr(m, "_default_model", fake_default_model)
+    monkeypatch.setattr(m, "get_roster", fake_get_roster)
+    monkeypatch.setattr(m, "_sync_profile_provider", fake_sync)
+
+    resp = client.post("/bots", json={"name": "alpha", "title": "Alpha", "description": "d"})
+    assert resp.status_code == 200
+    assert sync_calls == [("alpha", "default-prov")]
+
+
+def test_update_bot_syncs_the_provider_on_a_model_change(client, monkeypatch):
+    sync_calls = []
+
+    async def fake_dash_send(method, path, body=None, query=None):
+        return {}
+
+    async def fake_lock(profile, provider, model):
+        pass
+
+    async def fake_sync(profile, provider):
+        sync_calls.append((profile, provider))
+
+    monkeypatch.setattr(m, "dash_send", fake_dash_send)
+    monkeypatch.setattr(m, "_lock_active_session_model", fake_lock)
+    monkeypatch.setattr(m, "_sync_profile_provider", fake_sync)
+
+    resp = client.patch("/bots/alpha", json={"provider": "prov-b", "model": "model-b"})
+    assert resp.status_code == 200
+    assert sync_calls == [("alpha", "prov-b")]
+
+
+# ---------------------------------------------------------------------------
 # Chat resilience
 # ---------------------------------------------------------------------------
 

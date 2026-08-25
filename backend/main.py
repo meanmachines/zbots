@@ -222,8 +222,8 @@ async def dash_get(path: str, query: Optional[dict] = None, **params) -> Any:
     return r.json()
 
 
-async def dash_send(method: str, path: str, body: Optional[dict] = None) -> Any:
-    r = await _dashboard_request(method, path, json_body=body)
+async def dash_send(method: str, path: str, body: Optional[dict] = None, query: Optional[dict] = None) -> Any:
+    r = await _dashboard_request(method, path, params=query, json_body=body)
     if r.status_code >= 400:
         raise HTTPException(status_code=r.status_code, detail=r.text[:500])
     if not r.content:
@@ -342,6 +342,59 @@ def _provision_profile_api_server_key(profile: str) -> None:
                 f.write("\n")
             f.write(f"API_SERVER_KEY={API_SERVER_KEY}\n")
     except OSError:
+        pass
+
+
+async def _sync_profile_provider(profile: str, provider: Optional[str]) -> None:
+    """Give profile's own config.yaml a real definition for `provider`, not
+    just a model: reference to a name only the default profile defines.
+
+    Real bug found live (Phase 1 http-transport testing, see the project
+    plan): under gateway.multiplex_profiles, each profile is a fully
+    independent Hermes install -- vendor's gateway/run.py
+    _profile_runtime_scope redirects HERMES_HOME to that profile's own
+    directory with NO inheritance from the default profile's config.
+    create_bot()/update_bot() have only ever written model: {provider,
+    default} into a profile's own config.yaml -- never the providers:
+    block that actually defines what that provider IS (base_url,
+    key_env, ...), which only the default profile's config has (written
+    once by entrypoint.sh's bootstrap, or by the /providers CRUD below,
+    both of which only ever touch the default profile).
+
+    This silently worked under the embedded chat transport the whole time
+    zBots has existed: engine._get_adapter() builds ONE shared adapter
+    from the DEFAULT profile's config and reuses it for every bot
+    regardless of profile scope, so provider resolution always resolved
+    against that one cached copy no matter which profile a chat call was
+    "scoped" to. The real gateway process (http transport) resolves
+    providers strictly from whichever profile's config is actually in
+    scope for that request -- confirmed live: the instant
+    ZBOTS_CHAT_TRANSPORT=http was set, every non-default bot's first chat
+    call failed with "Unknown provider '<name>'" (the default bot was
+    unaffected -- its "own" config already IS the default profile's).
+
+    Skips built-in routing providers (openrouter, auto, custom, and
+    anything hermes-agent's own PROVIDER_REGISTRY/ALIASES recognize --
+    see _reserved_provider_ids) -- those resolve through native code paths
+    and env-var API keys, not a providers: entry, so there's nothing to
+    copy. Best-effort: a provider that isn't in the default profile's own
+    config (shouldn't happen -- every provider a bot can be assigned to
+    comes from that same catalog, see /models) or a dash_send failure
+    here shouldn't fail bot creation/update over a sync step: the bot
+    still works fine on the embedded transport either way, and this only
+    matters once/if the http transport is enabled.
+    """
+    if not provider or provider in _reserved_provider_ids():
+        return
+    try:
+        default_cfg = await dash_get("/api/config")
+        provider_cfg = (default_cfg.get("providers") or {}).get(provider)
+        if not provider_cfg:
+            return
+        await dash_send(
+            "PUT", "/api/config", {"config": {"providers": {provider: provider_cfg}}}, query={"profile": profile}
+        )
+    except Exception:
         pass
 
 
@@ -554,6 +607,7 @@ async def create_bot(body: BotCreate) -> RosterEntry:
         },
     )
     _provision_profile_api_server_key(name)
+    await _sync_profile_provider(name, provider)
     if body.title:
         await _mutate_state(lambda d: d["titles"].__setitem__(name, body.title))
     if body.soul:
@@ -618,6 +672,7 @@ async def update_bot(name: str, body: BotUpdate) -> dict:
         await dash_send("PUT", f"/api/profiles/{name}/description", {"description": body.description})
     if body.provider and body.model:
         await dash_send("PUT", f"/api/profiles/{name}/model", {"provider": body.provider, "model": body.model})
+        await _sync_profile_provider(name, body.provider)
         await _lock_active_session_model(name, body.provider, body.model)
     if body.soul is not None:
         await dash_send("PUT", f"/api/profiles/{name}/soul", {"content": body.soul})

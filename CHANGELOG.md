@@ -47,14 +47,35 @@ tagged on `main`.
   the transport underneath changed. `_profile_scope` becomes a no-op
   under `http` -- scoping happens on the wire via `/p/<profile>/`
   (requires the `multiplex_profiles` fix above) instead of a contextvar.
-  Not yet flipped on anywhere; will be exercised live on zbots-dev first,
-  per the project plan.
   - New `_call_handler_http`/`_run_stream_attempt_http`, covered by
     `tests/test_engine_http_transport.py` (profile-prefix routing,
     header/body forwarding, transport-failure-becomes-500, and SSE-frame
     reassembly across a real chunked response's chunk boundaries -- the
     one thing the old in-memory queue couldn't exercise since every
     `write()` there was already one whole frame).
+  - Live-tested on zbots-dev: `http` transport worked immediately for the
+    `default` bot but every other bot failed with `"Unknown provider
+    '<name>'"`. Root cause: under `multiplex_profiles`, each profile is a
+    fully independent Hermes install (`gateway/run.py`'s
+    `_profile_runtime_scope` redirects `HERMES_HOME` to that profile's own
+    directory, no inheritance from `default`) -- but `create_bot()`/
+    `update_bot()` have only ever written a `model: {provider, default}`
+    *reference* into a profile's own `config.yaml`, never the `providers:`
+    block that actually defines what that provider IS (base_url, key_env).
+    This worked by accident under the embedded transport the whole time
+    zBots has existed: `engine._get_adapter()` builds ONE shared adapter
+    from `default`'s config and reuses it regardless of which profile a
+    call is "scoped" to, so provider resolution never actually depended on
+    the scoped profile's own config having anything. Fixed with
+    `_sync_profile_provider()`, called from both `create_bot()` and
+    `update_bot()` right after a provider is assigned -- copies that
+    provider's real definition from the default profile's own config into
+    the target profile's, via the same `PUT /api/config` (profile-scoped)
+    real hermes-agent already exposes. Skips built-in routing providers
+    (openrouter/auto/custom/anything in `PROVIDER_REGISTRY`) since those
+    resolve through native code paths, not a `providers:` entry. Covered
+    by new tests in `test_backend.py`; re-verified live afterward against
+    a non-default bot on zbots-dev with `ZBOTS_CHAT_TRANSPORT=http`.
 
 ### Added
 - Coding tasks now get delegated to a dedicated "coder" bot instead of
