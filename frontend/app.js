@@ -1903,6 +1903,27 @@ document.getElementById("show-hidden-btn").addEventListener("click", () => {
   refreshRoster();
 });
 
+async function refreshNotifyBtn() {
+  const btn = document.getElementById("notify-btn");
+  if (!pushSupported()) {
+    btn.style.display = "none";
+    return;
+  }
+  const enabled = await isPushEnabled();
+  btn.innerHTML = icon(enabled ? "bell" : "bell-off", 16);
+  btn.classList.toggle("active", enabled);
+  btn.title = enabled ? "Reminder notifications on -- click to disable" : "Enable reminder notifications";
+}
+
+document.getElementById("notify-btn").addEventListener("click", async () => {
+  if (await isPushEnabled()) {
+    await disablePushNotifications();
+  } else {
+    await enablePushNotifications();
+  }
+  refreshNotifyBtn();
+});
+
 [
   ["bot-modal-backdrop", "bot-modal-cancel"],
   ["dup-modal-backdrop", null],
@@ -2017,6 +2038,7 @@ async function boot() {
   await refreshRoster();
   clearInterval(rosterPollTimer);
   rosterPollTimer = setInterval(refreshRoster, 8000);
+  refreshNotifyBtn(); // best-effort, never blocks the rest of boot on a slow/unsupported check
 }
 
 boot();

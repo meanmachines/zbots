@@ -265,6 +265,25 @@ try:
 except ImportError:
     import bot_processes
 
+try:
+    from . import push
+except ImportError:
+    import push
+
+# asyncio.create_task()'s own docs warn that a task with no strong
+# reference held elsewhere can be garbage-collected mid-flight -- this
+# set is that reference, with a done-callback to stop holding it once it
+# finishes (success or failure) so the set doesn't grow forever. Same
+# pattern supervisor_mcp.py already uses for its own delegated-task
+# background sends.
+_background_tasks: set = set()
+
+
+def _fire_and_forget(coro) -> None:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
 
 def _reserved_provider_ids() -> frozenset[str]:
     """Built-in provider names hermes-agent's own resolver recognizes
@@ -917,6 +936,16 @@ async def upload_avatar(name: str, file: UploadFile = File(...)) -> dict:
 
 class SendMessage(BaseModel):
     text: str
+    # Real gap found live: a routine's own delivery (a cron-triggered turn
+    # calling its message_bot tool -- see supervisor_mcp.py's own calls,
+    # which set this True) reaches the SAME endpoint the interactive UI
+    # calls when the user is live in that bot's chat. The UI never sets
+    # this (the user is already looking at the reply as it streams in);
+    # an asynchronous delivery the user isn't necessarily watching does,
+    # so it can trigger a real push notification -- see push.py's own
+    # module docstring for why that needs to be real Web Push, not a
+    # same-tab-only Notification() call.
+    notify: bool = False
 
 
 @app.get("/bots/{name}/messages")
@@ -932,6 +961,12 @@ async def bot_send(name: str, body: SendMessage) -> dict:
     if not text:
         raise HTTPException(status_code=400, detail="Message text required.")
     reply = await send_to_bot(name, text)
+    if body.notify and reply:
+        # Fire-and-forget, same convention as supervisor_mcp.py's own
+        # background delegated-task pattern -- a slow/failing push send
+        # must never add latency to (or fail) the chat reply itself,
+        # which has already fully succeeded by this point.
+        _fire_and_forget(push.send_push_notification(_pretty_title(name), reply))
     return {"reply": reply}
 
 
@@ -942,6 +977,40 @@ async def bot_send_stream(name: str, body: SendMessage) -> StreamingResponse:
     if not text:
         raise HTTPException(status_code=400, detail="Message text required.")
     return StreamingResponse(stream_to_bot(name, text), media_type="text/event-stream")
+
+
+# --------------------------------------------------------------------------
+# Push notifications -- see push.py's own module docstring for why real
+# Web Push (not a same-tab Notification() call) and why nothing in
+# hermes-agent itself could be reused for this.
+# --------------------------------------------------------------------------
+
+@app.get("/push/vapid-public-key")
+async def push_vapid_public_key() -> dict:
+    return {"key": push.get_public_key_b64()}
+
+
+class PushSubscribe(BaseModel):
+    subscription: dict
+
+
+@app.post("/push/subscribe")
+async def push_subscribe(body: PushSubscribe) -> dict:
+    try:
+        push.add_subscription(body.subscription)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True}
+
+
+class PushUnsubscribe(BaseModel):
+    endpoint: str
+
+
+@app.post("/push/unsubscribe")
+async def push_unsubscribe(body: PushUnsubscribe) -> dict:
+    push.remove_subscription(body.endpoint)
+    return {"ok": True}
 
 
 # --------------------------------------------------------------------------

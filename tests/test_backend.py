@@ -903,3 +903,74 @@ def test_startup_handler_uses_the_retrying_roster_fetch(monkeypatch):
 
     asyncio.run(m._spawn_keep_warm_bots_and_start_reaper())
     assert len(retry_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Push notifications -- SendMessage.notify wiring (bot_send) and the
+# /push/* endpoints. See push.py's own module docstring for why this
+# exists and why it's real Web Push, not a same-tab Notification() call.
+# ---------------------------------------------------------------------------
+
+def test_bot_send_does_not_push_by_default(client, monkeypatch):
+    monkeypatch.setattr(m, "send_to_bot", AsyncMock(return_value="a reply"))
+    push_calls = []
+    monkeypatch.setattr(m.push, "send_push_notification", AsyncMock(side_effect=lambda *a: push_calls.append(a)))
+
+    resp = client.post("/bots/alpha/messages", json={"text": "hi"})
+    assert resp.status_code == 200
+    assert resp.json() == {"reply": "a reply"}
+    assert push_calls == []
+
+
+def test_bot_send_pushes_when_notify_is_set(client, monkeypatch):
+    monkeypatch.setattr(m, "send_to_bot", AsyncMock(return_value="Hey Zainey, drink some water!"))
+    push_calls = []
+    monkeypatch.setattr(m.push, "send_push_notification", AsyncMock(side_effect=lambda *a: push_calls.append(a)))
+
+    resp = client.post("/bots/hydration-reminder/messages", json={"text": "[internal-trigger] ...", "notify": True})
+    assert resp.status_code == 200
+    assert push_calls == [("Hydration Reminder", "Hey Zainey, drink some water!")]
+
+
+def test_bot_send_does_not_push_an_empty_reply(client, monkeypatch):
+    monkeypatch.setattr(m, "send_to_bot", AsyncMock(return_value=""))
+    push_calls = []
+    monkeypatch.setattr(m.push, "send_push_notification", AsyncMock(side_effect=lambda *a: push_calls.append(a)))
+
+    resp = client.post("/bots/alpha/messages", json={"text": "hi", "notify": True})
+    assert resp.status_code == 200
+    assert push_calls == []
+
+
+def test_get_vapid_public_key(client, monkeypatch):
+    monkeypatch.setattr(m.push, "get_public_key_b64", lambda: "fake-public-key")
+    resp = client.get("/push/vapid-public-key")
+    assert resp.status_code == 200
+    assert resp.json() == {"key": "fake-public-key"}
+
+
+def test_push_subscribe(client, monkeypatch):
+    added = []
+    monkeypatch.setattr(m.push, "add_subscription", lambda sub: added.append(sub))
+    sub = {"endpoint": "https://push.example/abc", "keys": {"p256dh": "x", "auth": "y"}}
+    resp = client.post("/push/subscribe", json={"subscription": sub})
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    assert added == [sub]
+
+
+def test_push_subscribe_rejects_a_subscription_with_no_endpoint(client, monkeypatch):
+    def fake_add(sub):
+        raise ValueError("subscription missing endpoint")
+
+    monkeypatch.setattr(m.push, "add_subscription", fake_add)
+    resp = client.post("/push/subscribe", json={"subscription": {"keys": {}}})
+    assert resp.status_code == 400
+
+
+def test_push_unsubscribe(client, monkeypatch):
+    removed = []
+    monkeypatch.setattr(m.push, "remove_subscription", lambda endpoint: removed.append(endpoint))
+    resp = client.post("/push/unsubscribe", json={"endpoint": "https://push.example/abc"})
+    assert resp.status_code == 200
+    assert removed == ["https://push.example/abc"]

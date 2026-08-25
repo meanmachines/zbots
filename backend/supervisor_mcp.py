@@ -141,7 +141,13 @@ async def message_bot(name: str, message: str) -> str:
     is already in that bot's own chat if the user wants to open it."""
     await _require_bot(name)
     async with httpx.AsyncClient(timeout=300) as client:
-        r = await client.post(f"{BOTS_UI_BASE}/bots/{name}/messages", json={"text": message})
+        # notify=True: an asynchronous delivery like this one (a routine's
+        # own turn calling this tool, or one bot delegating to another)
+        # isn't necessarily something the user is watching live the way
+        # the interactive UI's own chat is -- worth a real push
+        # notification. See main.py's SendMessage.notify and push.py's
+        # own module docstring.
+        r = await client.post(f"{BOTS_UI_BASE}/bots/{name}/messages", json={"text": message, "notify": True})
         r.raise_for_status()
         return r.json()["reply"]
 
@@ -207,7 +213,12 @@ async def _run_delegated_task(task_id: str, from_bot: str, to_bot: str, task: st
     report = f"[delegated task {task_id} from {to_bot}] {result}"
     try:
         async with httpx.AsyncClient(timeout=300) as client:
-            await client.post(f"{BOTS_UI_BASE}/bots/{from_bot}/messages", json={"text": report})
+            # notify=True here specifically (not on the dispatch call
+            # above): this is the result actually landing back in the
+            # delegating bot's chat, asynchronously, possibly long after
+            # the user moved on -- the genuinely notification-worthy
+            # moment, unlike the intermediate dispatch to to_bot.
+            await client.post(f"{BOTS_UI_BASE}/bots/{from_bot}/messages", json={"text": report, "notify": True})
     except Exception:
         # Best-effort delivery -- the delegated work itself already ran
         # and produced a real result; losing the notification is a worse

@@ -42,6 +42,85 @@ function toast(msg) {
   toast._t = setTimeout(() => el.classList.remove("open"), 3200);
 }
 
+// ---------------------------------------------------------------------
+// Push notifications -- real Web Push for routine/delegated-task
+// deliveries (see backend/push.py's own module docstring for why: works
+// even when this tab isn't open or focused, unlike a same-tab
+// Notification() call). Deliberately opt-in (a button click, not an
+// auto-prompt on page load) -- an unsolicited permission prompt on first
+// visit is a real anti-pattern browsers increasingly penalize (Chrome's
+// own abuse heuristics can auto-block an origin that gets dismissed too
+// often), and this app has no way to know if THIS is a first visit.
+// ---------------------------------------------------------------------
+
+function pushSupported() {
+  return "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+}
+
+// Web Push's own applicationServerKey wants a Uint8Array, not the
+// base64url string the backend hands back -- standard conversion, same
+// shape every Web Push guide/MDN's own example uses.
+function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(base64);
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+
+async function getPushSubscription() {
+  if (!pushSupported()) return null;
+  const reg = await navigator.serviceWorker.getRegistration("/bots/");
+  if (!reg) return null;
+  return reg.pushManager.getSubscription();
+}
+
+async function isPushEnabled() {
+  return !!(await getPushSubscription());
+}
+
+async function enablePushNotifications() {
+  if (!pushSupported()) {
+    toast("This browser doesn't support push notifications");
+    return false;
+  }
+  const permission = await Notification.requestPermission();
+  if (permission !== "granted") {
+    toast("Notification permission was not granted");
+    return false;
+  }
+  const reg = await navigator.serviceWorker.register("/bots/sw.js", { scope: "/bots/" });
+  await navigator.serviceWorker.ready;
+  let sub = await reg.pushManager.getSubscription();
+  if (!sub) {
+    const { key } = await apiGet("/push/vapid-public-key");
+    sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(key),
+    });
+  }
+  await apiSend("POST", "/push/subscribe", { subscription: sub.toJSON() });
+  toast("Reminder notifications enabled");
+  return true;
+}
+
+async function disablePushNotifications() {
+  const sub = await getPushSubscription();
+  if (!sub) return;
+  const endpoint = sub.endpoint;
+  await sub.unsubscribe();
+  try {
+    await apiSend("POST", "/push/unsubscribe", { endpoint });
+  } catch (_) {
+    // Best-effort -- the browser-side unsubscribe above already
+    // succeeded (no more notifications will arrive locally either way);
+    // a failure telling the backend to forget the subscription just
+    // means one stale entry pruned on its next failed send instead.
+  }
+  toast("Reminder notifications disabled");
+}
+
 function fmtTime(ts) {
   if (!ts) return "-";
   return new Date(ts * 1000).toLocaleString();

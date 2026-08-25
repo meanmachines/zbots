@@ -483,6 +483,71 @@ async def _roll_over_bot_session(profile: str, headers: dict, all_sessions: list
     return await _create_bot_session(profile, _bot_chat_title(profile, next_n), headers)
 
 
+async def _context_bridge_note(profile: str, old_session_id: str, headers: dict) -> str:
+    """Real bug found live: a rollover swaps in a genuinely fresh session
+    with zero conversational memory, even though get_bot_messages' own
+    merged-history view makes the whole family look like one continuous
+    thread to the user. Confirmed live: a short, direct follow-up ("it
+    should remind every 5 minute") landed on a freshly-rolled-over
+    session with no idea what "it" referred to, and the model answered
+    "I'm not sure what you're referring to" -- correct given what IT could
+    see, useless to the person on the other end who'd just been asked a
+    direct question one message earlier.
+
+    hermes-agent's own gateway/run.py has a mechanism for a related
+    problem: _pending_model_notes prepends a short note to the next
+    outgoing message so the model knows about a model switch that just
+    happened, before responding. That's an internal contextvar zBots'
+    session-level rollover has no access to (it never touches the
+    engine's own pending-notes queue -- rollover is a zBots-level
+    workaround sitting a layer above), so this borrows the same PATTERN
+    (prepend a short recap to the next message) rather than the
+    mechanism itself: pull the old session's last few turns and hand them
+    to the model as plain recap text ahead of the user's real message.
+
+    Best-effort, deliberately cheap -- no extra LLM call to summarize,
+    just the raw recent turns verbatim (truncated). A failure here (the
+    old session's own messages endpoint erroring, itself the kind of
+    thing that can accompany a rollover) means the retry proceeds with no
+    recap, exactly the behavior before this existed -- never worth
+    failing the whole retry over.
+    """
+    try:
+        status, body = await _call_handler(
+            "_handle_session_messages",
+            profile=profile,
+            method="GET",
+            path=f"/api/sessions/{old_session_id}/messages",
+            query={"limit": 6},
+            headers=headers,
+            match_info={"session_id": old_session_id},
+        )
+        if status >= 400:
+            return ""
+        rows = (body or {}).get("data") or (body or {}).get("messages") or []
+        lines = []
+        for row in rows[-6:]:
+            role = row.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            text = _message_text(row).strip()
+            if not text:
+                continue
+            lines.append(f"{'You' if role == 'assistant' else 'User'}: {text[:300]}")
+        if not lines:
+            return ""
+        return (
+            "[A brief technical hiccup just restarted this conversation on a "
+            "fresh session -- you have no memory of it. Here is what was "
+            "just discussed, so you can pick back up naturally instead of "
+            "asking the user to repeat themselves:\n"
+            + "\n".join(lines)
+            + "\n-- end of recap. Now respond to the user's actual message below.]\n\n"
+        )
+    except Exception:
+        return ""
+
+
 async def send_to_bot(
     profile: str, message: str, api_server_key: str, active_session_id: Optional[str]
 ) -> tuple[str, str]:
@@ -501,14 +566,14 @@ async def send_to_bot(
     headers = _api_headers(api_server_key)
     session_id, all_sessions = await _ensure_bot_chat_session(profile, headers, active_session_id)
 
-    async def _chat(sid: str) -> tuple[int, Optional[dict]]:
+    async def _chat(sid: str, msg: Optional[str] = None) -> tuple[int, Optional[dict]]:
         with _profile_scope(profile):
             return await _call_handler(
                 "_handle_session_chat",
                 profile=profile,
                 method="POST",
                 path=f"/api/sessions/{sid}/chat",
-                json_body={"message": message},
+                json_body={"message": msg if msg is not None else message},
                 headers=headers,
                 match_info={"session_id": sid},
             )
@@ -517,10 +582,11 @@ async def send_to_bot(
         msg = (body or {}).get("message")
         return str(msg.get("content") or "") if isinstance(msg, dict) else ""
 
-    async def _rollover_and_retry(sid: str) -> tuple[str, int, Optional[dict]]:
-        sid = await _roll_over_bot_session(profile, headers, all_sessions)
-        status, body = await _chat(sid)
-        return sid, status, body
+    async def _rollover_and_retry(old_sid: str) -> tuple[str, int, Optional[dict]]:
+        note = await _context_bridge_note(profile, old_sid, headers)
+        new_sid = await _roll_over_bot_session(profile, headers, all_sessions)
+        status, body = await _chat(new_sid, (note + message) if note else message)
+        return new_sid, status, body
 
     status, body = await _chat(session_id)
     decision = resilience.evaluate(status=status, body=body, reply="")
@@ -896,9 +962,11 @@ async def stream_to_bot(
             for frame in pending:
                 yield frame
             return
+        note = await _context_bridge_note(profile, state["session_id"], headers)
         new_sid = await _roll_over_bot_session(profile, headers, all_sessions)
         state["session_id"] = new_sid
-        async for frame, _was_error in _run_stream_attempt(profile, new_sid, message, headers):
+        retry_message = (note + message) if note else message
+        async for frame, _was_error in _run_stream_attempt(profile, new_sid, retry_message, headers):
             yield frame
 
     return state, _chunks()
@@ -981,14 +1049,27 @@ def _dedupe_rollover_replay(messages: list[dict]) -> list[dict]:
     row (no reply in between either way) reads the same collapsed to one,
     so this is safe to always apply, not just detect the rollover case
     specifically.
+
+    Also matches a CONTEXT-BRIDGED replay (see _context_bridge_note): a
+    rollover retry sends "<recap note><original message>", not the bare
+    original text, so a plain equality check alone stops catching it --
+    checks whether one text ends with the other, not just exact equality,
+    so both the noteless and note-prefixed replay shapes collapse the
+    same way.
     """
+    def _is_replay(a: str, b: str) -> bool:
+        if a == b:
+            return True
+        shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+        return bool(shorter) and longer.endswith(shorter)
+
     out: list[dict] = []
     for msg in messages:
         if (
             out
             and msg.get("role") == "user"
             and out[-1].get("role") == "user"
-            and _message_text(msg) == _message_text(out[-1])
+            and _is_replay(_message_text(msg), _message_text(out[-1]))
         ):
             continue
         out.append(msg)

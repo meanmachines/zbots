@@ -252,3 +252,122 @@ def test_does_not_dedupe_across_an_intervening_assistant_reply():
     ]
     out = engine._dedupe_rollover_replay(messages)
     assert len(out) == 3
+
+
+def test_dedupes_a_context_bridged_replay(monkeypatch):
+    # _context_bridge_note prepends a recap to the retried message, so the
+    # rolled-over session's own persisted user text is no longer an exact
+    # match -- it ends with the original instead. Must still collapse to
+    # one, and the CLEAN (noteless) text is the one that survives.
+    messages = [
+        {"role": "assistant", "content": "Want me to leave it at hourly, or change the cadence?", "timestamp": 1},
+        {"role": "user", "content": "it should remind every 5 minute", "timestamp": 2},
+        {
+            "role": "user",
+            "content": "[A brief technical hiccup just restarted this conversation...]\n\nit should remind every 5 minute",
+            "timestamp": 3,
+        },
+        {"role": "assistant", "content": "Got it, every 5 minutes.", "timestamp": 4},
+    ]
+    out = engine._dedupe_rollover_replay(messages)
+    assert [m["content"] for m in out] == [
+        "Want me to leave it at hourly, or change the cadence?",
+        "it should remind every 5 minute",
+        "Got it, every 5 minutes.",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# _context_bridge_note -- real bug found live: a rollover swaps in a
+# genuinely fresh session with zero conversational memory, even though
+# get_bot_messages' own merged-history view makes the whole family look
+# like one continuous thread. A direct, short follow-up landed on a
+# freshly-rolled-over session with no idea what it referred to ("I'm not
+# sure what you're referring to"). Borrows hermes-agent's own
+# _pending_model_notes PATTERN (gateway/run.py -- prepend a short note to
+# the next outgoing message) rather than the mechanism itself, since
+# rollover is a zBots-level workaround with no access to that internal
+# queue.
+# ---------------------------------------------------------------------------
+
+def test_context_bridge_note_recaps_the_old_sessions_last_turns(monkeypatch):
+    async def fake_call_handler(handler_name, *, profile, method, path, query=None, headers=None, match_info=None):
+        assert path == "/api/sessions/old-sid/messages"
+        return 200, {
+            "data": [
+                {"role": "user", "content": "set up a water reminder"},
+                {"role": "assistant", "content": "Done. Want it hourly, or a different cadence?"},
+            ]
+        }
+
+    monkeypatch.setattr(engine, "_call_handler", fake_call_handler)
+    note = asyncio.run(engine._context_bridge_note("default", "old-sid", {}))
+    assert "set up a water reminder" in note
+    assert "Done. Want it hourly, or a different cadence?" in note
+    assert note.endswith("\n\n")
+
+
+def test_context_bridge_note_is_empty_on_a_fetch_failure(monkeypatch):
+    async def fake_call_handler(*args, **kwargs):
+        return 500, {"error": "boom"}
+
+    monkeypatch.setattr(engine, "_call_handler", fake_call_handler)
+    note = asyncio.run(engine._context_bridge_note("default", "old-sid", {}))
+    assert note == ""
+
+
+def test_context_bridge_note_is_empty_with_no_prior_messages(monkeypatch):
+    async def fake_call_handler(*args, **kwargs):
+        return 200, {"data": []}
+
+    monkeypatch.setattr(engine, "_call_handler", fake_call_handler)
+    note = asyncio.run(engine._context_bridge_note("default", "old-sid", {}))
+    assert note == ""
+
+
+def test_context_bridge_note_swallows_an_exception(monkeypatch):
+    async def boom(*args, **kwargs):
+        raise RuntimeError("connection reset")
+
+    monkeypatch.setattr(engine, "_call_handler", boom)
+    note = asyncio.run(engine._context_bridge_note("default", "old-sid", {}))  # must not raise
+    assert note == ""
+
+
+def test_send_to_bot_prepends_the_note_to_the_retried_message(monkeypatch):
+    # http transport, not embedded -- avoids _profile_scope's embedded
+    # branch constructing the real vendored adapter (which needs packages
+    # not installed in this test environment); every dependency this test
+    # actually exercises is mocked below regardless of transport.
+    monkeypatch.setattr(engine, "_CHAT_TRANSPORT", "http")
+
+    async def fake_ensure_session(profile, headers, active_session_id):
+        return "sid-1", [{"id": "sid-1"}]
+
+    async def fake_roll_over(profile, headers, all_sessions):
+        return "sid-2"
+
+    async def fake_note(profile, old_sid, headers):
+        assert old_sid == "sid-1"
+        return "[recap]\n\n"
+
+    chat_calls = []
+
+    async def fake_call_handler(handler_name, *, profile, method, path, json_body=None, headers=None, match_info=None, query=None):
+        if handler_name == "_handle_session_chat":
+            chat_calls.append(json_body["message"])
+            sid = match_info["session_id"]
+            if sid == "sid-1":
+                return 200, {"message": {"content": "HTTP 400: stale-model"}}
+            return 200, {"message": {"content": "the real answer"}}
+        raise AssertionError(f"unexpected handler {handler_name}")
+
+    monkeypatch.setattr(engine, "_ensure_bot_chat_session", fake_ensure_session)
+    monkeypatch.setattr(engine, "_roll_over_bot_session", fake_roll_over)
+    monkeypatch.setattr(engine, "_context_bridge_note", fake_note)
+    monkeypatch.setattr(engine, "_call_handler", fake_call_handler)
+
+    reply, session_id = asyncio.run(engine.send_to_bot("default", "the original message", "key", None))
+    assert session_id == "sid-2"
+    assert reply == "the real answer"
+    assert chat_calls == ["the original message", "[recap]\n\nthe original message"]

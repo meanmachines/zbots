@@ -44,6 +44,8 @@ const ICONS = {
   retry: '<path d="M4 10a8 8 0 1 1 2 5.7"/><path d="M4 4v6h6"/>',
   download: '<path d="M12 4v10M7 10l5 5 5-5M4 20h16"/>',
   copy: '<rect x="9" y="9" width="11" height="11" rx="1.5"/><path d="M5 15V5a1 1 0 0 1 1-1h10"/>',
+  bell: '<path d="M6 8a6 6 0 0 1 12 0c0 4 1.5 5.5 2 6.5H4c.5-1 2-2.5 2-6.5Z"/><path d="M10 19a2 2 0 0 0 4 0"/>',
+  "bell-off": '<path d="M3 3l18 18"/><path d="M6 8a6 6 0 0 1 10.2-4.3M18 12.5V8a6 6 0 0 0-.4-2.1M6 8c0 4-1.5 5.5-2 6.5h11"/><path d="M10 19a2 2 0 0 0 4 0"/>',
 };
 
 function icon(name, size) {

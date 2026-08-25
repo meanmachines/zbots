@@ -6,6 +6,91 @@ tagged on `main`.
 
 ## [Unreleased]
 
+### Added
+- Real browser push notifications for routine/delegated-task deliveries
+  ("browser push notification for a hydration reminder... works even if
+  the zBots tab isn't focused" -- requested live). Checked hermes-agent's
+  own vendored source first, per instruction: the desktop app's own
+  notification mechanism is Electron's native `Notification` module,
+  driven by IPC from the renderer -- no web-based equivalent, and no
+  VAPID/service-worker/Web-Push code anywhere in `hermes_cli`'s own
+  Python side either. Nothing to reuse; built as a new capability.
+  - New `backend/push.py`: real Web Push (RFC 8030 + VAPID, via
+    `pywebpush`), not a same-tab `Notification()` call. VAPID key pair
+    generated once via `py_vapid`'s own `Vapid.from_file()` (persists to
+    the volume, never regenerated -- a changed key silently invalidates
+    every existing browser subscription) . Subscriptions stored in their
+    own small JSON registry, same convention as `bot_processes.py`'s own
+    port/worker registry; a subscription the push service itself reports
+    gone (404/410) gets pruned automatically on next send. Covered by
+    `tests/test_push.py` (12 tests) -- the real network send is mocked,
+    key generation/persistence and subscription CRUD are exercised for
+    real (cheap, local, no network).
+  - New endpoints: `GET /push/vapid-public-key`, `POST /push/subscribe`,
+    `POST /push/unsubscribe`.
+  - `SendMessage.notify` (default `False`): when `true`, a successful
+    `POST /bots/{name}/messages` fires a push notification in the
+    background (`_fire_and_forget`, same convention as
+    `supervisor_mcp.py`'s own delegated-task pattern -- a slow/failing
+    push send must never add latency to, or fail, the chat reply itself).
+    The interactive UI's own calls never set it (the user is already
+    watching the reply arrive live); `supervisor_mcp.py`'s `message_bot`
+    tool and the result-delivery leg of `delegate_task` now do, since
+    those are asynchronous deliveries the user isn't necessarily watching
+    -- exactly the routine/reminder-delivery case that prompted this.
+  - Frontend: new `frontend/sw.js` service worker (`push`/
+    `notificationclick` handlers -- clicking a notification focuses an
+    already-open zBots tab instead of always opening a new one). New
+    opt-in bell button in the sidebar header (`common.js`'s
+    `enablePushNotifications`/`disablePushNotifications`) -- deliberately
+    NOT an auto-prompt on page load (an unsolicited permission prompt on
+    first visit is a real anti-pattern Chrome's own abuse heuristics can
+    penalize, and this app has no way to know if a given load is a first
+    visit).
+
+### Fixed
+- Real bug found live: a resilience-triggered rollover (see the
+  `gateway.multiplex_profiles`/provider-scoping fixes above for the two
+  other real bugs this session's rollover logic already recovers from)
+  swaps in a genuinely fresh session with zero conversational memory, even
+  though `get_bot_messages`' own merged-history view makes the whole
+  session family look like one continuous thread. Confirmed live: a
+  direct, short follow-up ("it should remind every 5 minute") landed on a
+  freshly-rolled-over session with no idea what "it" referred to, and the
+  model answered "I'm not sure what you're referring to" -- correct given
+  what it could actually see, useless to the person who'd just been asked
+  a direct question one message earlier. Traced with real evidence (two
+  distinct session ids ~107 seconds apart, the rolled-over session's own
+  message history starting cold) rather than assumed.
+  - Fixed by borrowing hermes-agent's own PATTERN for a related problem
+    (`gateway/run.py`'s `_pending_model_notes` -- prepends a short note to
+    the next outgoing message so the model knows about a model switch
+    that just happened) rather than the mechanism itself (an internal
+    contextvar zBots' session-level rollover has no access to, since
+    rollover is a zBots-level workaround sitting a layer above the
+    engine's own session handling). New `_context_bridge_note()` in
+    `engine.py`: pulls the old session's last few turns and prepends them
+    as plain recap text ahead of the retried message -- deliberately no
+    extra LLM call to summarize, just the raw recent turns verbatim
+    (truncated). Wired into both `send_to_bot`'s and `stream_to_bot`'s
+    rollover paths.
+  - Real follow-on bug caught before it shipped: prepending the recap
+    changes what's persisted as the user's own retried message, which
+    broke `_dedupe_rollover_replay`'s exact-text-equality check (built
+    earlier this session for the plain, noteless replay case) -- the
+    note-prefixed retry no longer matched the original message exactly,
+    so it stopped collapsing to one and the user's own prompt would have
+    reappeared twice in the merged view again. Fixed by matching on
+    "one text ends with the other" instead of exact equality, which
+    correctly collapses both the noteless and note-prefixed replay
+    shapes, keeping the clean (noteless) copy as the one that survives.
+  - Also clarified, not fixed (turned out already correct): the
+    delegation-confirmation-routing concern raised alongside this turned
+    out to already work as expected -- reading the actual session history
+    confirmed the delegating bot's own "Done, I set up..." confirmation
+    really did land back in its own chat; the described symptom was this
+    same rollover bug on the very next turn, not a routing problem.
+
 ### Changed
 - Chat backend architecture: replaced the shared, multiplexed `hermes
   gateway run` process (one process serving every bot's chat via
