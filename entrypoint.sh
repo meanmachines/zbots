@@ -160,11 +160,27 @@ SUPERVISOR_PID=$!
 # roughly doubles idle memory use (measured ~197MB -> ~365MB with zero
 # platforms enabled), which is why the container's memory budget was raised
 # to 1024MB before adding this rather than after.
-(cd /opt/zbots/backend && exec python3 -m hermes_cli.main gateway run) &
-GATEWAY_PID=$!
+#
+# Conditional on ZBOTS_CHAT_TRANSPORT: under the "embedded" default (the
+# regression baseline every deploy starts from -- see backend/engine.py's
+# own module docstring), this stays the ONLY process touching HERMES_HOME
+# for real gateway work, unchanged from before per-bot workers existed.
+# Under "http", main.py's own startup handler
+# (_spawn_keep_warm_bots_and_start_reaper, backend/bot_processes.py)
+# spawns "default" as its own dedicated worker instead -- which now
+# provides BOTH chat AND connectors for default, replacing this process'
+# role entirely. Running both at once would mean two separate processes
+# constructing a GatewayRunner against the exact same HERMES_HOME/session
+# store concurrently -- never done, not worth the risk of finding out what
+# breaks first.
+GATEWAY_PID=""
+if [ "${ZBOTS_CHAT_TRANSPORT:-embedded}" != "http" ]; then
+    (cd /opt/zbots/backend && exec python3 -m hermes_cli.main gateway run) &
+    GATEWAY_PID=$!
+fi
 
 # Stop the others if nginx exits so the container signals failure instead
 # of hanging around with a half-dead process tree.
-trap 'kill "$BACKEND_PID" "$DASHBOARD_PID" "$SUPERVISOR_PID" "$GATEWAY_PID" 2>/dev/null || true' EXIT
+trap 'kill "$BACKEND_PID" "$DASHBOARD_PID" "$SUPERVISOR_PID" $GATEWAY_PID 2>/dev/null || true' EXIT
 
 nginx -g 'daemon off;'

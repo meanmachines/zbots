@@ -6,6 +6,93 @@ tagged on `main`.
 
 ## [Unreleased]
 
+### Changed
+- Chat backend architecture: replaced the shared, multiplexed `hermes
+  gateway run` process (one process serving every bot's chat via
+  `/p/<profile>/` URL-prefix scoping) with a genuinely separate,
+  dedicated worker process per bot -- every bot, including `default`, now
+  runs its own unscoped, single-profile `gateway.run.start_gateway()`
+  instance. This is the real fix for the class of credential/config-
+  scoping bug this session found and patched twice (see the two entries
+  below this one): request-time scoping inside one shared process was an
+  ongoing surface for exactly this kind of bug, and removing the sharing
+  removes the whole class instead of patching instances one at a time.
+  - New `backend/bot_worker.py` -- the actual per-bot process entry
+    point. Sets `HERMES_HOME`/`API_SERVER_PORT` for that ONE profile
+    before any hermes-agent import happens, then calls
+    `gateway.run.start_gateway()` directly -- the exact same top-level
+    "run until interrupted" entry point `hermes gateway run`'s own CLI
+    command calls, confirmed to already construct+connect every
+    configured platform adapter (including `api_server`) on its own, no
+    manual adapter wiring needed. `engine.py`'s own
+    `_build_runner_and_adapter()` (used only by the embedded transport)
+    is untouched.
+  - New `backend/bot_processes.py` -- owns the worker pool from the
+    FastAPI process: deterministic port allocation persisted to its own
+    registry file (survives a backend restart without reassigning a bot
+    to a port a still-running worker is on), `ensure_bot_process_running()`
+    (spawns via `multiprocessing` with the `"spawn"` start method if not
+    already tracked alive, waits for a real `GET /health`),
+    `stop_bot_process()` (SIGTERM via `Process.terminate()`, SIGKILL
+    escalation if uncooperative), `reap_idle()`. Liveness is a real check
+    (`os.kill(pid, 0)`), not a cache read -- a pid recorded by a prior
+    backend process that's since died is treated as orphaned, matching
+    this session's own `session_turn_leases` methodology applied to
+    process ownership instead. Covered by `tests/test_bot_processes.py`
+    (21 tests), every subprocess/httpx call mocked -- no real process
+    spawning in the suite (a real bug hit live while building this: the
+    existing `test_backend.py` create_bot/update_bot/delete_session tests
+    started spawning genuine `multiprocessing.Process` children and
+    blocking past the test harness's own timeout the moment
+    `ensure_bot_process_running()` went unmocked -- fixed by isolating
+    `BOT_PROCESSES_STATE_PATH` to a tempdir and auto-mocking
+    `ensure_bot_process_running` in the shared `client` fixture).
+  - `engine.py`'s and `main.py`'s own (intentionally duplicated, to avoid
+    a circular import) `_bot_base(profile)` now resolve every profile --
+    `default` no longer special-cased -- through
+    `bot_processes.get_port(profile)` instead of a shared-gateway URL or
+    `/p/<profile>/` prefix. `_profile_scope`'s http-transport no-op branch
+    needed no code change, just an updated comment: scoping now happens
+    by construction (a dedicated worker is already unscoped to its one
+    profile for its whole lifetime), not on the wire.
+  - Lifecycle is dynamic per bot, not a manual flag: a bot with at least
+    one ENABLED routine is classified keep-warm (its own cron scheduler
+    only runs while its own worker is alive -- there is no external
+    "wake me before my cron fires" mechanism, so a routine-bearing bot
+    has to stay up for that routine to ever fire at all); `default` is
+    always keep-warm (it also carries messaging connectors, replacing the
+    old always-on `GATEWAY_PID`'s role); everything else is on-demand --
+    woken by `send_to_bot`/`stream_to_bot`/`create_bot`/`update_bot`/
+    `delete_session` calling `ensure_bot_process_running()` before
+    dialing (all of them always do real HTTP against a bot's own worker,
+    independent of `ZBOTS_CHAT_TRANSPORT` -- confirmed live for the
+    session-lock/delete-session pair, which predate that flag entirely),
+    reaped by a periodic sweep (`BOT_IDLE_REAP_SECONDS`, default 30m)
+    that never touches a keep-warm bot. New `_keep_warm_bots()`/
+    `_spawn_keep_warm_bots_and_start_reaper()` (FastAPI startup)/
+    `_idle_reap_loop()`/`_stop_all_bot_processes()` (FastAPI shutdown) in
+    `main.py`, covered by new tests in `test_backend.py`.
+  - `entrypoint.sh`'s old unconditional `GATEWAY_PID` block (`hermes
+    gateway run`, the shared multiplexed process) is now conditional on
+    `ZBOTS_CHAT_TRANSPORT`: unchanged under the `embedded` default (still
+    the only thing touching `HERMES_HOME` for real gateway work, exactly
+    as before this change), skipped entirely under `http` -- where
+    `default`'s own dedicated worker takes over that role instead.
+    Deliberately NOT run alongside each other: two separate processes
+    constructing a `GatewayRunner` against the same `HERMES_HOME`/session
+    store concurrently was never tested and not worth the risk.
+  - `gateway.multiplex_profiles: true` (added earlier this session) is
+    left in place in the bootstrap config -- now dead/unused config since
+    nothing generates a `/p/<profile>/`-prefixed URL any more, but
+    harmless, and an already-bootstrapped volume's on-disk config.yaml
+    wouldn't pick up a bootstrap-heredoc removal anyway. Not worth the
+    risk of a live edit for a purely cosmetic cleanup.
+  - Real memory/cold-start cost per worker still needs live measurement
+    on zbots-dev before `ZBOTS_CHAT_TRANSPORT=http` is turned on there --
+    zbots-dev was already at ~55% of its 1024MB budget idle under the old
+    architecture. `mcp__zorc__request_memory_increase`/`approve_action`
+    is the known-working path once real numbers are in hand.
+
 ### Fixed
 - `gateway.multiplex_profiles` was never set anywhere in zBots' bootstrap
   config, so it defaulted to `False` -- meaning the real api_server

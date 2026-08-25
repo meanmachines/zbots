@@ -197,6 +197,24 @@ def test_get_bot_soul(client, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# _bot_base -- every profile, including "default", resolves through
+# bot_processes.get_port now (its own dedicated worker process), not a
+# shared-gateway URL or /p/<profile>/ prefix. Same duplication reasoning
+# as engine.py's own copy (kept separate to avoid a circular import) --
+# see bot_processes.py's own module docstring for why this exists.
+# ---------------------------------------------------------------------------
+
+def test_bot_base_uses_bot_processes_get_port(monkeypatch):
+    monkeypatch.setattr(m.bot_processes, "get_port", lambda profile: 8765)
+    assert m._bot_base("coder") == "http://127.0.0.1:8765"
+
+
+def test_bot_base_does_not_special_case_default(monkeypatch):
+    monkeypatch.setattr(m.bot_processes, "get_port", lambda profile: 8700)
+    assert m._bot_base("default") == "http://127.0.0.1:8700"
+
+
+# ---------------------------------------------------------------------------
 # _sync_profile_provider -- real bug found live (Phase 1 http-transport
 # testing, see the project plan): under gateway.multiplex_profiles, a
 # secondary profile's own config.yaml never inherits the default profile's
@@ -393,6 +411,100 @@ def test_update_bot_syncs_the_provider_on_a_model_change(client, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# ensure_bot_process_running wiring -- create_bot/update_bot/delete_session
+# all always do real HTTP against a bot's own worker (bot_processes.py),
+# independent of engine.py's own ZBOTS_CHAT_TRANSPORT (see each call
+# site's own comment in main.py) -- a currently-sleeping bot needs waking
+# first or the call would fail against a port nothing is listening on.
+# ---------------------------------------------------------------------------
+
+def test_create_bot_wakes_the_new_bots_worker(client, monkeypatch):
+    wake_calls = []
+
+    async def fake_dash_send(method, path, body=None, query=None):
+        return {}
+
+    async def fake_default_model():
+        return "default-prov", "default-model"
+
+    async def fake_get_roster(include_hidden=False):
+        return [m.RosterEntry(name="alpha", title="Alpha", description="", provider="prov-a", model="model-a")]
+
+    async def fake_wake(profile):
+        wake_calls.append(profile)
+        return 8700
+
+    monkeypatch.setattr(m, "dash_send", fake_dash_send)
+    monkeypatch.setattr(m, "_default_model", fake_default_model)
+    monkeypatch.setattr(m, "get_roster", fake_get_roster)
+    monkeypatch.setattr(m.bot_processes, "ensure_bot_process_running", fake_wake)
+
+    resp = client.post("/bots", json={"name": "alpha", "title": "Alpha", "description": "d"})
+    assert resp.status_code == 200
+    assert wake_calls == ["alpha"]
+
+
+def test_update_bot_wakes_the_bot_before_locking_its_model(client, monkeypatch):
+    wake_calls = []
+
+    async def fake_dash_send(method, path, body=None, query=None):
+        return {}
+
+    async def fake_lock(profile, provider, model):
+        pass
+
+    async def fake_wake(profile):
+        wake_calls.append(profile)
+        return 8700
+
+    monkeypatch.setattr(m, "dash_send", fake_dash_send)
+    monkeypatch.setattr(m, "_lock_active_session_model", fake_lock)
+    monkeypatch.setattr(m.bot_processes, "ensure_bot_process_running", fake_wake)
+
+    resp = client.patch("/bots/alpha", json={"provider": "prov-b", "model": "model-b"})
+    assert resp.status_code == 200
+    assert wake_calls == ["alpha"]
+
+
+def test_update_bot_does_not_wake_anything_on_a_non_model_change(client, monkeypatch):
+    wake_calls = []
+
+    async def fake_dash_send(method, path, body=None, query=None):
+        return {}
+
+    async def fake_wake(profile):
+        wake_calls.append(profile)
+        return 8700
+
+    monkeypatch.setattr(m, "dash_send", fake_dash_send)
+    monkeypatch.setattr(m.bot_processes, "ensure_bot_process_running", fake_wake)
+
+    resp = client.patch("/bots/alpha", json={"description": "just a description change"})
+    assert resp.status_code == 200
+    assert wake_calls == []
+
+
+def test_delete_session_wakes_the_bot_before_dialing_it(client, monkeypatch):
+    wake_calls = []
+
+    async def fake_wake(profile):
+        wake_calls.append(profile)
+        return 8700
+
+    monkeypatch.setattr(m.bot_processes, "ensure_bot_process_running", fake_wake)
+    monkeypatch.setattr(m.bot_processes, "get_port", lambda profile: 8700)
+
+    async def fake_delete(*args, **kwargs):
+        return _fake_response(200, {"ok": True})
+
+    monkeypatch.setattr(m.httpx.AsyncClient, "delete", fake_delete)
+
+    resp = client.delete("/sessions/sess-1?profile=alpha")
+    assert resp.status_code == 200
+    assert wake_calls == ["alpha"]
+
+
+# ---------------------------------------------------------------------------
 # Chat resilience
 # ---------------------------------------------------------------------------
 
@@ -557,3 +669,153 @@ def test_state_migration_stamps_version(state_file):
 def test_state_defaults_when_missing(state_file):
     assert m._read_state()["version"] == m.STATE_VERSION
     assert m._read_state()["groups"] == {}
+
+
+# ---------------------------------------------------------------------------
+# Bot worker lifecycle -- _keep_warm_bots, the startup/shutdown handlers,
+# and the idle-reap loop. See bot_processes.py's own module docstring and
+# main.py's "Bot worker lifecycle" section comment for the reasoning: a
+# bot's own cron scheduler only runs while ITS OWN worker is alive, so any
+# bot with an enabled routine has to stay warm for that routine to ever
+# fire; "default" is always warm (messaging connectors); everything else
+# is on-demand, woken by a real chat request and reaped after inactivity.
+# ---------------------------------------------------------------------------
+
+def test_keep_warm_bots_always_includes_default(monkeypatch):
+    async def fake_dash_get(path, **kwargs):
+        return {"data": []}
+
+    monkeypatch.setattr(m, "dash_get", fake_dash_get)
+    warm = asyncio.run(m._keep_warm_bots(["default", "coder"]))
+    assert "default" in warm
+    assert "coder" not in warm
+
+
+def test_keep_warm_bots_includes_a_bot_with_an_enabled_routine(monkeypatch):
+    async def fake_dash_get(path, **kwargs):
+        return {"data": [{"name": "[bot:coder] hydration-check", "enabled": True}]}
+
+    monkeypatch.setattr(m, "dash_get", fake_dash_get)
+    warm = asyncio.run(m._keep_warm_bots(["default", "coder", "botty"]))
+    assert warm == {"default", "coder"}
+
+
+def test_keep_warm_bots_ignores_a_disabled_routine(monkeypatch):
+    async def fake_dash_get(path, **kwargs):
+        return {"data": [{"name": "[bot:coder] hydration-check", "enabled": False}]}
+
+    monkeypatch.setattr(m, "dash_get", fake_dash_get)
+    warm = asyncio.run(m._keep_warm_bots(["default", "coder"]))
+    assert warm == {"default"}
+
+
+def test_keep_warm_bots_is_best_effort_on_a_dashboard_failure(monkeypatch):
+    async def boom(path, **kwargs):
+        raise m.httpx.ConnectError("no route")
+
+    monkeypatch.setattr(m, "dash_get", boom)
+    warm = asyncio.run(m._keep_warm_bots(["default", "coder"]))
+    assert warm == {"default"}  # still gets the unconditional part
+
+
+def test_startup_handler_is_a_noop_under_embedded_transport(monkeypatch):
+    monkeypatch.setattr(m._engine, "_use_http", lambda: False)
+    spawn_calls = []
+    monkeypatch.setattr(m.bot_processes, "ensure_bot_process_running", AsyncMock(side_effect=lambda p: spawn_calls.append(p)))
+    asyncio.run(m._spawn_keep_warm_bots_and_start_reaper())
+    assert spawn_calls == []
+
+
+def test_startup_handler_spawns_every_keep_warm_bot(monkeypatch):
+    monkeypatch.setattr(m._engine, "_use_http", lambda: True)
+
+    async def fake_get_roster(include_hidden=False):
+        return [
+            m.RosterEntry(name="default", title="Default", description=""),
+            m.RosterEntry(name="coder", title="Coder", description=""),
+        ]
+
+    spawn_calls = []
+
+    async def fake_wake(profile):
+        spawn_calls.append(profile)
+        return 8700
+
+    monkeypatch.setattr(m, "get_roster", fake_get_roster)
+    monkeypatch.setattr(m, "_keep_warm_bots", AsyncMock(return_value={"default"}))
+    monkeypatch.setattr(m.bot_processes, "ensure_bot_process_running", fake_wake)
+    monkeypatch.setattr(m.asyncio, "create_task", lambda coro: coro.close())  # don't actually start the reap loop
+
+    asyncio.run(m._spawn_keep_warm_bots_and_start_reaper())
+    assert spawn_calls == ["default"]
+
+
+def test_startup_handler_survives_one_bots_spawn_failure(monkeypatch):
+    monkeypatch.setattr(m._engine, "_use_http", lambda: True)
+
+    async def fake_get_roster(include_hidden=False):
+        return [m.RosterEntry(name="default", title="Default", description="")]
+
+    async def fake_wake_that_fails(profile):
+        raise RuntimeError("worker never became ready")
+
+    monkeypatch.setattr(m, "get_roster", fake_get_roster)
+    monkeypatch.setattr(m, "_keep_warm_bots", AsyncMock(return_value={"default"}))
+    monkeypatch.setattr(m.bot_processes, "ensure_bot_process_running", fake_wake_that_fails)
+    monkeypatch.setattr(m.asyncio, "create_task", lambda coro: coro.close())
+
+    asyncio.run(m._spawn_keep_warm_bots_and_start_reaper())  # must not raise
+
+
+def test_shutdown_handler_stops_every_tracked_worker(monkeypatch):
+    monkeypatch.setattr(m._engine, "_use_http", lambda: True)
+    monkeypatch.setattr(m.bot_processes, "_processes", {"coder": object(), "hydration-reminder": object()})
+    stop_calls = []
+
+    async def fake_stop(profile, **kwargs):
+        stop_calls.append(profile)
+
+    monkeypatch.setattr(m.bot_processes, "stop_bot_process", fake_stop)
+    asyncio.run(m._stop_all_bot_processes())
+    assert sorted(stop_calls) == ["coder", "hydration-reminder"]
+
+
+def test_shutdown_handler_is_a_noop_under_embedded_transport(monkeypatch):
+    monkeypatch.setattr(m._engine, "_use_http", lambda: False)
+    monkeypatch.setattr(m.bot_processes, "_processes", {"coder": object()})
+    stop_calls = []
+    monkeypatch.setattr(m.bot_processes, "stop_bot_process", AsyncMock(side_effect=lambda p, **k: stop_calls.append(p)))
+    asyncio.run(m._stop_all_bot_processes())
+    assert stop_calls == []
+
+
+def test_idle_reap_loop_sweeps_using_roster_activity(monkeypatch):
+    async def fake_get_roster(include_hidden=False):
+        return [
+            m.RosterEntry(name="default", title="Default", description="", last_active=1000.0),
+            m.RosterEntry(name="coder", title="Coder", description="", last_active=1.0),
+        ]
+
+    reap_calls = []
+
+    async def fake_reap(*, idle_since, keep_warm, threshold_s):
+        reap_calls.append((idle_since, keep_warm, threshold_s))
+        return []
+
+    async def sleep_once_then_stop(_seconds):
+        if len(reap_calls) >= 1:
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(m, "get_roster", fake_get_roster)
+    monkeypatch.setattr(m, "_keep_warm_bots", AsyncMock(return_value={"default"}))
+    monkeypatch.setattr(m.bot_processes, "reap_idle", fake_reap)
+    monkeypatch.setattr(m.asyncio, "sleep", sleep_once_then_stop)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(m._idle_reap_loop())
+
+    assert len(reap_calls) == 1
+    idle_since, keep_warm, threshold_s = reap_calls[0]
+    assert idle_since == {"default": 1000.0, "coder": 1.0}
+    assert keep_warm == {"default"}
+    assert threshold_s == m.IDLE_REAP_SECONDS

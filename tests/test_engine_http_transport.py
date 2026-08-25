@@ -1,13 +1,16 @@
-"""Unit tests for engine.py's http-transport primitives (Phase 1 of the
-native-hermes migration, see the project plan) -- _call_handler_http and
+"""Unit tests for engine.py's http-transport primitives (originally Phase 1
+of the native-hermes migration; _bot_base itself was later superseded by
+the per-bot dedicated worker process architecture -- see
+bot_processes.py's own module docstring) -- _call_handler_http and
 _run_stream_attempt_http. Every real socket is replaced with
 httpx.MockTransport, matching how test_backend.py already mocks the wire
 boundary for the embedded path's own callers.
 
 These pin two things the embedded path never had to worry about:
-1. _bot_base's /p/<profile>/ URL-prefix scoping actually lands in the
-   request (the whole point of the multiplex_profiles fix -- see
-   engine.py's own _bot_base docstring).
+1. _bot_base resolves each profile to that bot's own dedicated worker
+   port (bot_processes.get_port), including "default" -- confirmed here
+   so a future change to _bot_base can't silently regress back to a
+   shared/URL-prefix scheme without a test noticing.
 2. a real chunked response can split one SSE frame across more than one
    read (the in-memory queue the embedded path used never could) --
    _run_stream_attempt_http has to reassemble on blank-line boundaries
@@ -41,10 +44,32 @@ def _use_http_transport(monkeypatch, handler):
 
 
 # ---------------------------------------------------------------------------
+# _bot_base itself -- every profile, including "default", resolves through
+# bot_processes.get_port now, not a shared-gateway URL.
+# ---------------------------------------------------------------------------
+
+def test_bot_base_uses_bot_processes_get_port(monkeypatch):
+    monkeypatch.setattr(engine.bot_processes, "get_port", lambda profile: 8765)
+    assert engine._bot_base("coder") == "http://127.0.0.1:8765"
+
+
+def test_bot_base_does_not_special_case_default(monkeypatch):
+    seen_profiles = []
+
+    def fake_get_port(profile):
+        seen_profiles.append(profile)
+        return 8700
+
+    monkeypatch.setattr(engine.bot_processes, "get_port", fake_get_port)
+    assert engine._bot_base("default") == "http://127.0.0.1:8700"
+    assert seen_profiles == ["default"]
+
+
+# ---------------------------------------------------------------------------
 # _call_handler_http / _call_handler dispatch
 # ---------------------------------------------------------------------------
 
-def test_non_default_profile_gets_the_p_prefix(monkeypatch):
+def test_non_default_profile_resolves_to_its_own_worker_port(monkeypatch):
     seen = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -53,6 +78,7 @@ def test_non_default_profile_gets_the_p_prefix(monkeypatch):
         return httpx.Response(200, json={"data": []})
 
     _use_http_transport(monkeypatch, handler)
+    monkeypatch.setattr(engine.bot_processes, "get_port", lambda profile: 8712)
 
     async def _run():
         return await engine._call_handler(
@@ -68,14 +94,13 @@ def test_non_default_profile_gets_the_p_prefix(monkeypatch):
     assert status == 200
     assert body == {"data": []}
     assert seen["method"] == "GET"
-    # HERMES_API_SERVER_URL is set to this canary value by conftest.py, on
-    # purpose -- if a test ever slipped and hit a real default instead of
-    # the mock transport, it would try to reach a host that doesn't
-    # resolve rather than silently succeeding against something real.
-    assert seen["url"] == f"{engine.API_SERVER_BASE}/p/coder/api/sessions?limit=200"
+    assert seen["url"] == "http://127.0.0.1:8712/api/sessions?limit=200"
 
 
-def test_default_profile_has_no_prefix(monkeypatch):
+def test_default_profile_also_resolves_to_its_own_worker_port(monkeypatch):
+    # "default" is no longer special-cased onto a shared gateway URL --
+    # every bot, "default" included, runs its own dedicated worker (see
+    # bot_processes.py's own module docstring for why).
     seen = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -83,13 +108,14 @@ def test_default_profile_has_no_prefix(monkeypatch):
         return httpx.Response(200, json={"ok": True})
 
     _use_http_transport(monkeypatch, handler)
+    monkeypatch.setattr(engine.bot_processes, "get_port", lambda profile: 8700)
 
     async def _run():
         return await engine._call_handler("_h", profile="default", method="GET", path="/api/sessions")
 
     status, body = asyncio.run(_run())
     assert status == 200
-    assert seen["url"] == f"{engine.API_SERVER_BASE}/api/sessions"
+    assert seen["url"] == "http://127.0.0.1:8700/api/sessions"
 
 
 def test_json_body_and_headers_are_forwarded(monkeypatch):

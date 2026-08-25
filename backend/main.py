@@ -8,11 +8,15 @@ this same container:
   - the dashboard's own REST API on 127.0.0.1:9119 (HTTP basic auth) for
     profile CRUD, config, and cron/routines -- exactly what the bundled
     ProfilesPage/CronPage already call.
-  - the api_server platform on 127.0.0.1:8642 (Bearer API_SERVER_KEY) for
-    actually chatting with a bot: this is the same session-based chat
-    protocol `hermes peer dm` uses (find-or-create a session titled
-    "Bot Chat" for that profile via the /p/<profile>/ multiplex mirror,
-    POST a message, read the reply).
+  - the api_server platform for actually chatting with a bot: this is the
+    same session-based chat protocol `hermes peer dm` uses (find-or-create
+    a session titled "Bot Chat" for that profile, POST a message, read the
+    reply). Under ZBOTS_CHAT_TRANSPORT=http, each bot runs its OWN
+    dedicated worker process (bot_processes.py) with its own port -- not
+    one shared gateway on a fixed port -- see bot_processes.py's own
+    module docstring for why (removing a real, twice-found class of
+    credential/config-scoping bug that a single shared multiplexed
+    process is an ongoing surface for).
 
 State this app owns that Hermes has no native concept of (hidden bots,
 avatar choices, group definitions) lives in a small JSON file on the
@@ -256,6 +260,11 @@ try:
 except ImportError:
     import engine as _engine
 
+try:
+    from . import bot_processes
+except ImportError:
+    import bot_processes
+
 
 def _reserved_provider_ids() -> frozenset[str]:
     """Built-in provider names hermes-agent's own resolver recognizes
@@ -297,9 +306,16 @@ def _custom_endpoint_id(raw: str) -> str:
 
 
 def _bot_base(profile: str) -> str:
-    if profile == "default":
-        return API_SERVER_BASE
-    return f"{API_SERVER_BASE}/p/{profile}"
+    """Same reasoning and duplication as engine.py's own _bot_base (kept
+    separate to avoid a circular import) -- every bot, "default" included,
+    now runs its own dedicated worker process (bot_processes.py), each
+    with its own real, unscoped api_server on its own port. This function
+    itself never wakes a sleeping worker -- callers that dial a bot
+    outside send_to_bot/stream_to_bot's own wrapper (create_bot,
+    update_bot, delete_session) call bot_processes.ensure_bot_process_running()
+    explicitly first; see each call site's own comment.
+    """
+    return f"http://127.0.0.1:{bot_processes.get_port(profile)}"
 
 
 def _api_headers() -> dict[str, str]:
@@ -453,6 +469,14 @@ def _provision_profile_provider_secret(profile: str, provider_cfg: dict) -> None
 
 
 async def send_to_bot(profile: str, message: str, *, timeout: float = 300.0) -> str:
+    # A no-op under the embedded transport (no per-bot worker exists at
+    # all there -- one shared in-process adapter serves every profile).
+    # Under http, this is the wake trigger a sleeping on-demand bot needs:
+    # spawns the worker if it isn't already tracked as alive, and blocks
+    # until its real GET /health succeeds, before the chat call below ever
+    # dials it. See bot_processes.py's own module docstring.
+    if _engine._use_http():
+        await bot_processes.ensure_bot_process_running(profile)
     state = _read_state()
     active_id = (state.get("active_sessions") or {}).get(profile)
     reply, session_id = await _engine.send_to_bot(profile, message, API_SERVER_KEY, active_id)
@@ -474,6 +498,8 @@ async def stream_to_bot(profile: str, message: str):
     fully drained -- read back from session_state AFTER the loop, not
     before it, unlike send_to_bot()'s single return value.
     """
+    if _engine._use_http():
+        await bot_processes.ensure_bot_process_running(profile)
     state = _read_state()
     active_id = (state.get("active_sessions") or {}).get(profile)
     session_state, chunks = await _engine.stream_to_bot(profile, message, API_SERVER_KEY, active_id)
@@ -683,6 +709,11 @@ async def create_bot(body: BotCreate) -> RosterEntry:
         # session immediately and lock the real provider onto it here,
         # rather than trusting the profile field to hold it correctly.
         try:
+            # A brand-new bot's worker has never been spawned -- both
+            # calls below always do real HTTP against this bot's own
+            # worker (bot_processes.py), regardless of engine.py's own
+            # ZBOTS_CHAT_TRANSPORT, so it has to exist first either way.
+            await bot_processes.ensure_bot_process_running(name)
             await _engine._ensure_bot_chat_session(name, _engine._api_headers(API_SERVER_KEY), None)
             await _lock_active_session_model(name, provider, model)
         except Exception:
@@ -727,6 +758,15 @@ async def update_bot(name: str, body: BotUpdate) -> dict:
     if body.provider and body.model:
         await dash_send("PUT", f"/api/profiles/{name}/model", {"provider": body.provider, "model": body.model})
         await _sync_profile_provider(name, body.provider)
+        try:
+            # _lock_active_session_model always does real HTTP against
+            # this bot's own worker (bot_processes.py) -- a currently-
+            # sleeping on-demand bot needs waking first, or its own POST
+            # (already best-effort/fails-soft internally) would silently
+            # no-op against a port nothing is listening on.
+            await bot_processes.ensure_bot_process_running(name)
+        except Exception:
+            pass
         await _lock_active_session_model(name, body.provider, body.model)
     if body.soul is not None:
         await dash_send("PUT", f"/api/profiles/{name}/soul", {"content": body.soul})
@@ -1385,9 +1425,13 @@ async def list_sessions(limit: int = 50, offset: int = 0) -> Any:
 async def delete_session(session_id: str, profile: str = "default") -> dict:
     """The dashboard (port 9119) has no session-delete route at all --
     confirmed live, grepped the whole web_server.py/web_routers tree.
-    Session deletion only exists on the api_server (port 8642, Bearer
-    auth), the same one bot chat already uses.
+    Session deletion only exists on the api_server, the same one bot chat
+    already uses -- always real HTTP against that bot's own worker
+    (bot_processes.py), independent of engine.py's own
+    ZBOTS_CHAT_TRANSPORT (this function never went through the embedded/
+    mocked-request path even before that flag existed).
     """
+    await bot_processes.ensure_bot_process_running(profile)
     base = _bot_base(profile)
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.delete(f"{base}/api/sessions/{session_id}", headers=_api_headers())
@@ -1709,10 +1753,15 @@ async def ready() -> dict:
     with no dashboard configured is still real and ready for chat, so
     admin-surface reachability is only checked when it applies.
     """
-    try:
-        _engine._get_adapter()
-    except Exception as exc:
-        return JSONResponse(status_code=503, content={"ok": False, "detail": f"engine not ready: {exc}"})
+    if not _engine._use_http():
+        # Only meaningful for the embedded transport -- under http, chat
+        # goes through per-bot dedicated workers (bot_processes.py), not
+        # this shared in-process adapter, so constructing it here would
+        # check something readiness no longer depends on.
+        try:
+            _engine._get_adapter()
+        except Exception as exc:
+            return JSONResponse(status_code=503, content={"ok": False, "detail": f"engine not ready: {exc}"})
 
     if os.environ.get("HERMES_DASHBOARD_URL"):
         try:
@@ -1733,3 +1782,102 @@ async def version() -> dict:
 @app.get("/health")
 async def health() -> dict:
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------
+# Bot worker lifecycle -- keep-warm classification and idle reaping, only
+# meaningful under ZBOTS_CHAT_TRANSPORT=http (see bot_processes.py's own
+# module docstring for the architecture this replaces). A bot's lifecycle
+# mode is derived, not a manual per-bot flag: any bot with at least one
+# enabled routine is treated as keep-warm (its own cron scheduler only
+# runs while ITS OWN worker process is alive -- there is no external "wake
+# me before my cron fires" mechanism, so a routine-bearing bot has to stay
+# up for that routine to ever fire at all), "default" is always keep-warm
+# (it also carries messaging connectors), everything else is on-demand:
+# spawned lazily by send_to_bot/stream_to_bot's own
+# ensure_bot_process_running() call, reaped here after IDLE_REAP_SECONDS
+# of inactivity.
+# --------------------------------------------------------------------------
+
+IDLE_REAP_SECONDS = float(os.environ.get("BOT_IDLE_REAP_SECONDS", str(30 * 60)))
+IDLE_REAP_INTERVAL_SECONDS = float(os.environ.get("BOT_IDLE_REAP_INTERVAL_SECONDS", "300"))
+
+
+async def _keep_warm_bots(profile_names: list[str]) -> set[str]:
+    """Every profile with at least one ENABLED routine, plus "default"
+    unconditionally. One /api/cron/jobs?profile=all fetch, not one call
+    per bot -- list_routines()'s own per-bot endpoint exists for the UI,
+    not for a loop over the whole roster.
+    """
+    keep_warm = {"default"} & set(profile_names)
+    try:
+        jobs = await dash_get("/api/cron/jobs", profile="all")
+    except Exception:
+        return keep_warm  # best-effort -- worst case, an on-demand bot with a routine wakes late once
+    rows = jobs if isinstance(jobs, list) else jobs.get("data", [])
+    for j in rows:
+        if not j.get("enabled"):
+            continue
+        bot = _routine_bot_from_job(j)
+        if bot in profile_names:
+            keep_warm.add(bot)
+    return keep_warm
+
+
+@app.on_event("startup")
+async def _spawn_keep_warm_bots_and_start_reaper() -> None:
+    if not _engine._use_http():
+        return
+    asyncio.create_task(_idle_reap_loop())
+    try:
+        roster = await get_roster(include_hidden=True)
+    except Exception:
+        return  # dashboard not reachable yet -- the next reap cycle (or a real chat request) will catch up
+    keep_warm = await _keep_warm_bots([e.name for e in roster])
+    results = await asyncio.gather(
+        *(bot_processes.ensure_bot_process_running(name) for name in keep_warm),
+        return_exceptions=True,
+    )
+    for name, result in zip(keep_warm, results):
+        if isinstance(result, Exception):
+            # Best-effort: one keep-warm bot failing to boot (a bad
+            # provider config, a genuinely unreachable model endpoint)
+            # shouldn't take the whole container down -- it just stays
+            # asleep until the next reap cycle retries it, or a chat
+            # request wakes it directly.
+            pass
+
+
+async def _idle_reap_loop() -> None:
+    while True:
+        await asyncio.sleep(IDLE_REAP_INTERVAL_SECONDS)
+        try:
+            roster = await get_roster(include_hidden=True)
+            keep_warm = await _keep_warm_bots([e.name for e in roster])
+            idle_since = {e.name: e.last_active for e in roster if e.last_active is not None}
+            await bot_processes.reap_idle(idle_since=idle_since, keep_warm=keep_warm, threshold_s=IDLE_REAP_SECONDS)
+        except Exception:
+            # Best-effort: a failed sweep just means bots stay warm a
+            # little longer than ideal -- never worth crashing the loop
+            # over, the next interval tries again.
+            pass
+
+
+@app.on_event("shutdown")
+async def _stop_all_bot_processes() -> None:
+    """Best-effort clean shutdown of every worker this backend process
+    spawned -- container stop/restart otherwise leaves them running as
+    orphans (still holding their ports, still burning memory) until
+    something notices via a liveness check on next boot. Only meaningful
+    ones this process actually tracks in memory (bot_processes._processes)
+    get a real SIGTERM here; a worker recorded in the on-disk registry by
+    a PRIOR backend process (this process never held its handle) is left
+    alone -- exactly the case _is_worker_alive's own pid check already
+    handles correctly on the next boot.
+    """
+    if not _engine._use_http():
+        return
+    await asyncio.gather(
+        *(bot_processes.stop_bot_process(name) for name in list(bot_processes._processes.keys())),
+        return_exceptions=True,
+    )

@@ -81,14 +81,31 @@ def _use_http() -> bool:
 # Same surface _lock_active_session_model/delete_session in main.py already
 # call over real HTTP -- duplicated here (not imported from main.py) to
 # avoid a circular import, since main.py itself imports this module as
-# `_engine`.
+# `_engine`. Kept as a fallback for HERMES_API_SERVER_URL overrides and by
+# bot_processes' own module (no per-bot worker involved there); no longer
+# used by _bot_base below now that every bot -- including "default" -- has
+# its own dedicated worker process instead of one shared multiplexed
+# gateway (see bot_processes.py's own module docstring for why).
 API_SERVER_BASE = os.environ.get("HERMES_API_SERVER_URL", "http://127.0.0.1:8642")
+
+try:
+    from . import bot_processes
+except ImportError:
+    import bot_processes
 
 
 def _bot_base(profile: str) -> str:
-    if profile == "default":
-        return API_SERVER_BASE
-    return f"{API_SERVER_BASE}/p/{profile}"
+    """Every bot -- "default" included -- now runs its own dedicated
+    worker process (bot_processes.py), each with its own real,
+    unscoped api_server listening on its own port. This replaces the
+    Phase 1 `/p/<profile>/` URL-prefix multiplex scheme entirely: that
+    scheme required gateway.multiplex_profiles and per-request profile
+    scoping inside one shared process, which is exactly the class of bug
+    (two real instances found and fixed this session -- see CHANGELOG)
+    this per-worker architecture removes at the root instead of patching
+    instance by instance.
+    """
+    return f"http://127.0.0.1:{bot_processes.get_port(profile)}"
 
 
 _runner = None
@@ -207,11 +224,12 @@ def _profile_scope(profile: str):
     _check_auth and the agent-creation path both read the active profile
     off a contextvar this sets.
 
-    A no-op under the http transport: scoping there happens on the wire,
-    via the /p/<profile>/ URL prefix _bot_base builds (see the plan's
-    "blocking finding" -- gateway.multiplex_profiles has to be on for that
-    prefix to mean anything, which it now is). Kept as a context manager
-    either way so call sites don't need an if/else around every use.
+    A no-op under the http transport: scoping there happens by construction
+    now -- each bot's own dedicated worker process (bot_processes.py) is
+    already unscoped to that one profile for its entire lifetime, so
+    there's nothing left for a per-request contextvar to do. Kept as a
+    context manager either way so call sites don't need an if/else around
+    every use.
     """
     if _use_http():
         import contextlib
