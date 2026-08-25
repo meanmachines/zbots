@@ -90,6 +90,18 @@ tagged on `main`.
     confirmed the delegating bot's own "Done, I set up..." confirmation
     really did land back in its own chat; the described symptom was this
     same rollover bug on the very next turn, not a routing problem.
+  - Follow-on cosmetic bug found live right after deploying the fix
+    above: a bridged retry becomes the fresh session's own opening
+    message, and hermes-agent's own native `preview` field (the roster's
+    "last message" snippet, set from a session's first stored message,
+    confirmed live by reading real session objects -- a cron session's
+    own preview is literally its opening system prompt) showed the
+    internal recap note instead of the user's actual message for any bot
+    that had just rolled over. `get_bot_messages`' own merged-chat view
+    already hid this correctly via the dedup fix above; `preview` reads
+    straight off the native session object, bypassing that entirely.
+    Fixed with `engine.strip_context_bridge_note()`, used by
+    `main.py`'s `get_bot_activity()`.
 
 ### Changed
 - Chat backend architecture: replaced the shared, multiplexed `hermes

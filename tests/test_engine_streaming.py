@@ -325,6 +325,20 @@ def test_context_bridge_note_is_empty_with_no_prior_messages(monkeypatch):
     assert note == ""
 
 
+def test_strip_context_bridge_note_removes_the_recap(monkeypatch):
+    async def fake_call_handler(handler_name, *, profile, method, path, query=None, headers=None, match_info=None):
+        return 200, {"data": [{"role": "user", "content": "set up a water reminder"}]}
+
+    monkeypatch.setattr(engine, "_call_handler", fake_call_handler)
+    note = asyncio.run(engine._context_bridge_note("default", "old-sid", {}))
+    bridged = note + "it should remind every 5 minute"
+    assert engine.strip_context_bridge_note(bridged) == "it should remind every 5 minute"
+
+
+def test_strip_context_bridge_note_is_a_noop_on_plain_text():
+    assert engine.strip_context_bridge_note("just a normal message") == "just a normal message"
+
+
 def test_context_bridge_note_swallows_an_exception(monkeypatch):
     async def boom(*args, **kwargs):
         raise RuntimeError("connection reset")

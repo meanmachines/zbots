@@ -543,7 +543,13 @@ async def get_bot_activity(profile: str) -> dict:
     last_active = session.get("last_active") or session.get("started_at")
     is_active = session.get("ended_at") is None and last_active is not None and (time.time() - last_active) < 300
     return {
-        "preview": session.get("preview") or "",
+        # strip_context_bridge_note: a rollover's retry becomes the fresh
+        # session's own opening message, and this native `preview` field
+        # is set from a session's first stored message -- see that
+        # function's own docstring for why the recap note needs
+        # stripping here specifically (get_bot_messages' own chat view
+        # already hides it via dedup; this field bypasses that).
+        "preview": _engine.strip_context_bridge_note(session.get("preview") or ""),
         "last_active": last_active,
         "is_active": is_active,
     }

@@ -974,3 +974,33 @@ def test_push_unsubscribe(client, monkeypatch):
     resp = client.post("/push/unsubscribe", json={"endpoint": "https://push.example/abc"})
     assert resp.status_code == 200
     assert removed == ["https://push.example/abc"]
+
+
+# ---------------------------------------------------------------------------
+# get_bot_activity -- real bug found live, right after the rollover
+# context-bridging fix shipped: a bridged retry becomes the fresh
+# session's own opening message, and the native `preview` field (set from
+# a session's first stored message) showed the internal recap note in the
+# roster instead of the user's actual last message.
+# ---------------------------------------------------------------------------
+
+def test_get_bot_activity_strips_a_context_bridge_note(monkeypatch):
+    async def fake_list_sessions(profile, headers):
+        return [{"id": "sid-1", "preview": "[A brief technical hiccup...]\n\nit should remind every 5 minute", "started_at": 1.0}]
+
+    monkeypatch.setattr(m._engine, "_list_bot_sessions", fake_list_sessions)
+    monkeypatch.setattr(
+        m._engine, "strip_context_bridge_note", lambda text: text.split("\n\n", 1)[-1] if "hiccup" in text else text
+    )
+
+    activity = asyncio.run(m.get_bot_activity("default"))
+    assert activity["preview"] == "it should remind every 5 minute"
+
+
+def test_get_bot_activity_leaves_a_normal_preview_untouched(monkeypatch):
+    async def fake_list_sessions(profile, headers):
+        return [{"id": "sid-1", "preview": "just a normal message", "started_at": 1.0}]
+
+    monkeypatch.setattr(m._engine, "_list_bot_sessions", fake_list_sessions)
+    activity = asyncio.run(m.get_bot_activity("default"))
+    assert activity["preview"] == "just a normal message"

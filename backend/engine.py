@@ -483,6 +483,29 @@ async def _roll_over_bot_session(profile: str, headers: dict, all_sessions: list
     return await _create_bot_session(profile, _bot_chat_title(profile, next_n), headers)
 
 
+_CONTEXT_BRIDGE_END_MARKER = "-- end of recap. Now respond to the user's actual message below.]\n\n"
+
+
+def strip_context_bridge_note(text: str) -> str:
+    """Real bug found live, right after the rollover context-bridging fix
+    shipped: a rollover's retry becomes the FRESH session's own opening
+    message, and hermes-agent's own native `preview` field (used for the
+    roster's "last message" snippet) is set from a session's first stored
+    message -- meaning a bridged retry's recap note, not the user's actual
+    text, showed up as the roster preview for any bot that had just
+    rolled over. get_bot_messages' own merged-chat view already hides
+    this correctly (the dedup logic collapses the note-prefixed retry
+    down to the clean original), but `preview` is read straight off the
+    native session object, bypassing that entirely. Used by
+    main.py's get_bot_activity(); exported (not a private helper) for
+    exactly that cross-module use.
+    """
+    idx = text.find(_CONTEXT_BRIDGE_END_MARKER)
+    if idx == -1:
+        return text
+    return text[idx + len(_CONTEXT_BRIDGE_END_MARKER) :]
+
+
 async def _context_bridge_note(profile: str, old_session_id: str, headers: dict) -> str:
     """Real bug found live: a rollover swaps in a genuinely fresh session
     with zero conversational memory, even though get_bot_messages' own
@@ -542,7 +565,8 @@ async def _context_bridge_note(profile: str, old_session_id: str, headers: dict)
             "just discussed, so you can pick back up naturally instead of "
             "asking the user to repeat themselves:\n"
             + "\n".join(lines)
-            + "\n-- end of recap. Now respond to the user's actual message below.]\n\n"
+            + "\n"
+            + _CONTEXT_BRIDGE_END_MARKER
         )
     except Exception:
         return ""
