@@ -325,14 +325,26 @@ def test_context_bridge_note_is_empty_with_no_prior_messages(monkeypatch):
     assert note == ""
 
 
-def test_strip_context_bridge_note_removes_the_recap(monkeypatch):
+def test_strip_context_bridge_note_replaces_a_full_bridged_message(monkeypatch):
     async def fake_call_handler(handler_name, *, profile, method, path, query=None, headers=None, match_info=None):
         return 200, {"data": [{"role": "user", "content": "set up a water reminder"}]}
 
     monkeypatch.setattr(engine, "_call_handler", fake_call_handler)
     note = asyncio.run(engine._context_bridge_note("default", "old-sid", {}))
     bridged = note + "it should remind every 5 minute"
-    assert engine.strip_context_bridge_note(bridged) == "it should remind every 5 minute"
+    assert engine.strip_context_bridge_note(bridged) == "(recovering from a brief hiccup...)"
+
+
+def test_strip_context_bridge_note_replaces_a_preview_truncated_mid_note():
+    # Real bug found live: hermes-agent's own native `preview` field is
+    # already truncated by the engine itself before zBots ever reads it --
+    # confirmed live, the roster showed "...restarted this conversation
+    # o..." cut off well short of the note's own end marker. The original
+    # (marker-search) version of this function always missed a truncated
+    # note like this and returned it unchanged; the fix has to work off
+    # the note's own OPENING words instead, which survive truncation.
+    truncated = "[A brief technical hiccup just restarted this conversation o..."
+    assert engine.strip_context_bridge_note(truncated) == "(recovering from a brief hiccup...)"
 
 
 def test_strip_context_bridge_note_is_a_noop_on_plain_text():

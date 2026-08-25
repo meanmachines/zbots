@@ -484,6 +484,8 @@ async def _roll_over_bot_session(profile: str, headers: dict, all_sessions: list
 
 
 _CONTEXT_BRIDGE_END_MARKER = "-- end of recap. Now respond to the user's actual message below.]\n\n"
+# Just the opening words -- enough to recognize the note by itself.
+_CONTEXT_BRIDGE_PREFIX = "[A brief technical hiccup just restarted this conversation"
 
 
 def strip_context_bridge_note(text: str) -> str:
@@ -496,14 +498,28 @@ def strip_context_bridge_note(text: str) -> str:
     rolled over. get_bot_messages' own merged-chat view already hides
     this correctly (the dedup logic collapses the note-prefixed retry
     down to the clean original), but `preview` is read straight off the
-    native session object, bypassing that entirely. Used by
-    main.py's get_bot_activity(); exported (not a private helper) for
-    exactly that cross-module use.
+    native session object, bypassing that entirely.
+
+    Real bug found live in THIS fix's own first attempt: it originally
+    searched for _CONTEXT_BRIDGE_END_MARKER and returned whatever came
+    after it -- works fine against the FULL note+message text
+    _context_bridge_note actually sends, but `preview` itself turned out
+    to already be truncated by the native engine (confirmed live: the
+    roster showed "...restarted this conversation o..." cut off well
+    short of even the recap's own last line, let alone the end marker),
+    so the marker this was searching for had usually already been cut off
+    by the time this function ever saw the text -- it always fell through
+    to "marker not found, return unchanged," which is the bug it was
+    supposed to fix, unfixed. The real user text isn't recoverable from a
+    pre-truncated preview at all, so this returns a plain, honest
+    placeholder instead of trying to reconstruct something that's gone.
+
+    Used by main.py's get_bot_activity(); exported (not a private helper)
+    for exactly that cross-module use.
     """
-    idx = text.find(_CONTEXT_BRIDGE_END_MARKER)
-    if idx == -1:
-        return text
-    return text[idx + len(_CONTEXT_BRIDGE_END_MARKER) :]
+    if text.startswith(_CONTEXT_BRIDGE_PREFIX):
+        return "(recovering from a brief hiccup...)"
+    return text
 
 
 async def _context_bridge_note(profile: str, old_session_id: str, headers: dict) -> str:

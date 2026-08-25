@@ -102,6 +102,18 @@ tagged on `main`.
     straight off the native session object, bypassing that entirely.
     Fixed with `engine.strip_context_bridge_note()`, used by
     `main.py`'s `get_bot_activity()`.
+    - That fix's own first version (marker-search: find
+      `_CONTEXT_BRIDGE_END_MARKER`, return what comes after it) shipped
+      broken -- verified live on zbots-dev, the roster still showed the
+      raw note. Root cause: `preview` turns out to already be truncated
+      by the native engine itself, well short of even the recap's own
+      last line, so the end marker being searched for had usually
+      already been cut off before this function ever saw the text --
+      real user text isn't recoverable from a pre-truncated preview at
+      all. Fixed properly by detecting the note's own fixed OPENING
+      words instead (survives truncation) and returning a plain,
+      honest placeholder rather than trying to reconstruct text that's
+      actually gone.
 
 ### Changed
 - Chat backend architecture: replaced the shared, multiplexed `hermes
