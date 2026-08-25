@@ -1,40 +1,51 @@
-"""Embedded engine bridge -- runs chat/session logic in-process instead of
-over loopback HTTP to a separately-running gateway.
+"""Chat/session bridge to hermes-agent's engine -- two transports, selected
+by ZBOTS_CHAT_TRANSPORT (default "embedded"), both reaching the exact same
+handler code:
 
-Why this exists and what it deliberately does NOT do: the engine's own
-chat/session handlers (gateway/platforms/api_server.py, APIServerAdapter)
-are written as aiohttp route handlers -- they take a real web.Request and
-return a real web.Response, and some of them (session creation in
-particular) run an atomic check-insert transaction inline in the handler
-rather than through a simple reusable method. Reimplementing that by hand
-risks quietly breaking the TOCTOU-safety it was built for. So instead of
-extracting and reimplementing that logic, this module constructs the
-adapter for real (same construction sequence gateway/run.py uses, minus
-the parts that open a network listener) and calls its actual handler
-methods directly, using aiohttp's own make_mocked_request to build a
-request object without a real HTTP connection. This reuses the real,
-tested logic and stays correct automatically when the vendored snapshot is
-updated -- see vendor/VENDORED_COMMIT.md.
+"http" (target end-state) talks real loopback HTTP to the api_server
+platform's gateway process (127.0.0.1:8642 by default, /p/<profile>/ for a
+non-default one) -- the same surface main.py's own
+_lock_active_session_model/delete_session already use, and the same
+protocol `hermes peer dm` speaks. This is the design main.py's own module
+docstring describes; nothing hand-rolled, no separate code path to keep in
+sync with upstream.
 
-What zBots gets from this: one process instead of two, no loopback network
-hop for the actual chat path, and the same profile-scoping/session-safety
-guarantees the real gateway has, because this IS the real gateway code,
-just not listening on a socket.
+"embedded" (the original, still-default path while http proves itself on
+zbots-dev) runs the engine's own aiohttp route handlers in-process instead
+-- constructs the real APIServerAdapter (same sequence gateway/run.py
+uses, minus opening a network listener) and calls its handler methods
+directly via aiohttp's own make_mocked_request, since some of them
+(session creation in particular) run an atomic check-insert transaction
+inline in the handler rather than through a reusable method, and
+reimplementing that by hand risks quietly breaking the TOCTOU-safety it
+was built for. This was a deliberate one-process/no-HTTP-hop efficiency
+trade (commit a932bf3), not a fix for anything wrong with real HTTP --
+that rationale is moot now that `hermes gateway run` already runs
+unconditionally as one of entrypoint.sh's own backgrounded processes.
+
+Every other piece of this module -- session bookkeeping (_list_bot_sessions,
+_ensure_bot_chat_session, rollover), the resilience-driven retry logic in
+send_to_bot/stream_to_bot, SSE frame handling -- is transport-agnostic and
+unchanged either way; only _call_handler/_run_stream_attempt and their
+_http/_embedded halves differ.
 
 Profile/config CRUD (profiles, MCP servers, skills, env vars, cron) is
-deliberately NOT embedded -- see the project plan for why: the real logic
-for those lives inside hermes_cli/web_server.py, a ~19000-line module with
-real import-time side effects (a second FastAPI app, singletons). Those
-stay on the existing HTTP calls in main.py.
+deliberately NOT handled by either transport here -- see the project plan
+for why: the real logic for those lives inside hermes_cli/web_server.py, a
+~19000-line module with real import-time side effects (a second FastAPI
+app, singletons). Those stay on the existing HTTP calls in main.py.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import sys
 from pathlib import Path
 from typing import Any, Optional
+
+import httpx
 
 try:
     from . import resilience
@@ -49,6 +60,36 @@ except ImportError:
 VENDOR_ROOT = Path(__file__).resolve().parent.parent / "vendor" / "hermes-agent"
 if str(VENDOR_ROOT) not in sys.path:
     sys.path.insert(0, str(VENDOR_ROOT))
+
+# Phase 1 of the native-hermes migration (see the project plan): the
+# mocked-request embedding below was always meant to be one of two
+# transports, not the only one -- main.py's own module docstring describes
+# the real target as loopback HTTP against the gateway's api_server
+# platform, the same surface _lock_active_session_model/delete_session
+# already use successfully. Flag-gated rather than a hard cutover so the
+# embedded path (proven, in production use) stays the safe fallback while
+# the http path gets exercised live on zbots-dev first. Read once at
+# import time, not per-request -- that per-call flexibility isn't worth
+# the complexity for a small dev app (see the plan's own rollout section).
+_CHAT_TRANSPORT = os.environ.get("ZBOTS_CHAT_TRANSPORT", "embedded").strip().lower()
+
+
+def _use_http() -> bool:
+    return _CHAT_TRANSPORT == "http"
+
+
+# Same surface _lock_active_session_model/delete_session in main.py already
+# call over real HTTP -- duplicated here (not imported from main.py) to
+# avoid a circular import, since main.py itself imports this module as
+# `_engine`.
+API_SERVER_BASE = os.environ.get("HERMES_API_SERVER_URL", "http://127.0.0.1:8642")
+
+
+def _bot_base(profile: str) -> str:
+    if profile == "default":
+        return API_SERVER_BASE
+    return f"{API_SERVER_BASE}/p/{profile}"
+
 
 _runner = None
 _adapter = None
@@ -165,12 +206,90 @@ def _profile_scope(profile: str):
     APIServerAdapter._profile_scope. Required before any handler call:
     _check_auth and the agent-creation path both read the active profile
     off a contextvar this sets.
+
+    A no-op under the http transport: scoping there happens on the wire,
+    via the /p/<profile>/ URL prefix _bot_base builds (see the plan's
+    "blocking finding" -- gateway.multiplex_profiles has to be on for that
+    prefix to mean anything, which it now is). Kept as a context manager
+    either way so call sites don't need an if/else around every use.
     """
+    if _use_http():
+        import contextlib
+
+        return contextlib.nullcontext()
     adapter = _get_adapter()
     return adapter._profile_scope(profile)
 
 
 async def _call_handler(
+    handler_name: str,
+    *,
+    profile: str,
+    method: str = "GET",
+    path: str = "/",
+    headers: Optional[dict] = None,
+    json_body: Optional[dict] = None,
+    query: Optional[dict] = None,
+    match_info: Optional[dict] = None,
+) -> tuple[int, Any]:
+    """Dispatch to whichever transport ZBOTS_CHAT_TRANSPORT selects. Both
+    return (status_code, parsed_json_body_or_None) so every caller here
+    (session list/create, chat, message read) stays transport-agnostic.
+    """
+    if _use_http():
+        return await _call_handler_http(
+            profile,
+            method=method,
+            path=path,
+            headers=headers,
+            json_body=json_body,
+            query=query,
+        )
+    return await _call_handler_embedded(
+        handler_name,
+        method=method,
+        path=path,
+        headers=headers,
+        json_body=json_body,
+        query=query,
+        match_info=match_info,
+    )
+
+
+async def _call_handler_http(
+    profile: str,
+    *,
+    method: str,
+    path: str,
+    headers: Optional[dict],
+    json_body: Optional[dict],
+    query: Optional[dict],
+) -> tuple[int, Any]:
+    """Real loopback HTTP against the gateway's api_server platform --
+    exactly the surface _lock_active_session_model/delete_session in
+    main.py already use, extended to cover the rest of the session/chat
+    calls this module makes.
+    """
+    url = f"{_bot_base(profile)}{path}"
+    params = {k: v for k, v in (query or {}).items() if v is not None} if query else None
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
+            response = await client.request(method, url, headers=headers, json=json_body, params=params)
+    except httpx.HTTPError as exc:
+        # Mirror _call_handler_embedded's own contract below: a transport
+        # failure becomes a 500 the caller's `status >= 400` checks (and
+        # resilience.evaluate) already handle, never an unhandled
+        # exception -- every rollover path in this module was written
+        # against that shape.
+        return 500, {"error": str(exc)}
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    return response.status_code, body
+
+
+async def _call_handler_embedded(
     handler_name: str,
     *,
     method: str = "GET",
@@ -280,6 +399,7 @@ async def _list_bot_sessions(profile: str, headers: dict) -> list[dict]:
     with _profile_scope(profile):
         status, body = await _call_handler(
             "_handle_list_sessions",
+            profile=profile,
             method="GET",
             path="/api/sessions",
             query={"limit": 200},
@@ -299,6 +419,7 @@ async def _create_bot_session(profile: str, title: str, headers: dict) -> str:
     with _profile_scope(profile):
         status, body = await _call_handler(
             "_handle_create_session",
+            profile=profile,
             method="POST",
             path="/api/sessions",
             json_body={"title": title, "source": "bots_ui"},
@@ -366,6 +487,7 @@ async def send_to_bot(
         with _profile_scope(profile):
             return await _call_handler(
                 "_handle_session_chat",
+                profile=profile,
                 method="POST",
                 path=f"/api/sessions/{sid}/chat",
                 json_body={"message": message},
@@ -560,7 +682,64 @@ async def _run_stream_attempt(profile: str, session_id: str, message: str, heade
     them -- was_error is True on the handler's own `event: error` frame
     (if any), or on an assistant.delta frame whose text is actually a
     stale-model-lock rejection wearing a normal-looking delta (see
-    _process_sse_frame); every other frame reports False.
+    _process_sse_frame); every other frame reports False. Dispatches to
+    whichever transport ZBOTS_CHAT_TRANSPORT selects -- both yield the
+    exact same (frame, was_error) contract, so stream_to_bot's own
+    _chunks() rollover-buffering needs no changes either way.
+    """
+    if _use_http():
+        async for item in _run_stream_attempt_http(profile, session_id, message, headers):
+            yield item
+        return
+    async for item in _run_stream_attempt_embedded(profile, session_id, message, headers):
+        yield item
+
+
+async def _run_stream_attempt_http(profile: str, session_id: str, message: str, headers: dict):
+    """Real per-token streaming over an actual chunked HTTP response,
+    driving the same _process_sse_frame parser the embedded path uses.
+
+    SSE frames are separated on the wire by a blank line (api_server's own
+    _sse_frame formats them "event: ...\\ndata: ...\\n\\n") -- a real
+    chunked response can split one frame across more than one read, which
+    the embedded path's in-memory queue never could (each write() there
+    was already one whole frame), so frames are reassembled on "\\n\\n"
+    boundaries here before being handed to the parser, per open question 3
+    in the plan.
+    """
+    from gateway.platforms.api_server import _sse_frame
+
+    url = f"{_bot_base(profile)}/api/sessions/{session_id}/chat/stream"
+    request_headers = dict(headers)
+    request_headers["Accept"] = "text/event-stream"
+    buf = b""
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=10.0)) as client:
+            async with client.stream(
+                "POST", url, headers=request_headers, json={"message": message}
+            ) as response:
+                if response.status_code >= 400:
+                    error_body = await response.aread()
+                    detail = error_body.decode("utf-8", errors="replace") or str(response.status_code)
+                    yield _sse_frame({"message": detail}, event="error", ensure_ascii=False), True
+                    return
+                async for chunk in response.aiter_bytes():
+                    buf += chunk
+                    while b"\n\n" in buf:
+                        raw, buf = buf.split(b"\n\n", 1)
+                        raw += b"\n\n"
+                        frame, is_stale_lock = _process_sse_frame(raw, _sse_frame)
+                        yield frame, is_stale_lock or raw.startswith(b"event: error\n")
+        if buf.strip():
+            frame, is_stale_lock = _process_sse_frame(buf, _sse_frame)
+            yield frame, is_stale_lock or buf.startswith(b"event: error\n")
+    except httpx.HTTPError as exc:
+        yield _sse_frame({"message": str(exc)}, event="error", ensure_ascii=False), True
+
+
+async def _run_stream_attempt_embedded(profile: str, session_id: str, message: str, headers: dict):
+    """Embedded-transport version of _run_stream_attempt -- see that
+    function's own docstring for the shared yield contract.
     """
     from aiohttp.base_protocol import BaseProtocol
     from aiohttp.streams import StreamReader
@@ -721,23 +900,30 @@ async def get_bot_messages(profile: str, api_server_key: str, limit: int = 200) 
         return []
     all_messages: list[dict] = []
     for session in sessions:
-        # Deliberately NOT wrapped in _profile_scope here -- real bug
-        # found live: for any non-default profile, _handle_session_messages
-        # returns zero messages while scoped to that profile, even for a
-        # session provably owned by it (confirmed: the same session_id,
-        # same call, unscoped, returns the real messages correctly).
-        # _handle_list_sessions and session/chat creation all work fine
-        # scoped; this is specific to the message-read handler, and only
-        # for secondary profiles -- matches the same class of bug already
-        # documented elsewhere in the vendored engine around multiplex/
-        # secondary-profile scoping (see agent.auxiliary_client's
-        # _scoped_key_env). A session is looked up by its own globally
-        # unique id, not by profile, so dropping the scope here doesn't
-        # risk reading the wrong session -- it just stops an internal
-        # ownership check that appears to only resolve correctly for the
-        # default profile.
+        # Deliberately NOT wrapped in _profile_scope here (embedded
+        # transport only -- see _profile_scope's own docstring, this is
+        # already a no-op under http) -- real bug found live: for any
+        # non-default profile, _handle_session_messages returns zero
+        # messages while scoped to that profile, even for a session
+        # provably owned by it (confirmed: the same session_id, same call,
+        # unscoped, returns the real messages correctly). _handle_list_sessions
+        # and session/chat creation all work fine scoped; this is specific
+        # to the message-read handler, and only for secondary profiles --
+        # matches the same class of bug already documented elsewhere in
+        # the vendored engine around multiplex/secondary-profile scoping
+        # (see agent.auxiliary_client's _scoped_key_env). A session is
+        # looked up by its own globally unique id, not by profile, so
+        # dropping the scope here doesn't risk reading the wrong session --
+        # it just stops an internal ownership check that appears to only
+        # resolve correctly for the default profile. Open question per the
+        # plan: under http, scoping happens on the wire via _bot_base's
+        # /p/<profile>/ prefix regardless of this comment -- needs a live
+        # check against a non-default bot to see if the same zero-messages
+        # bug reappears there, since that's a different code path
+        # (URL-prefix routing, not the contextvar this comment is about).
         status, body = await _call_handler(
             "_handle_session_messages",
+            profile=profile,
             method="GET",
             path=f"/api/sessions/{session['id']}/messages",
             query={"limit": limit},

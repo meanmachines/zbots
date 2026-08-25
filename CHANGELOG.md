@@ -32,6 +32,30 @@ tagged on `main`.
     depends on it -- verified live against a fresh bot, `.env` populated
     automatically, real chat round-trip works.
 
+### Changed
+- Phase 1 of moving zBots' chat path onto hermes-agent's native
+  architecture: `engine.py`'s session/chat calls (list/create sessions,
+  chat, message read, and per-token streaming) can now go over real
+  loopback HTTP to the api_server gateway process instead of the
+  `aiohttp.test_utils.make_mocked_request` in-process embedding that was
+  the only option before -- the design `main.py`'s own module docstring
+  already described, and the same surface `_lock_active_session_model`/
+  `delete_session` used successfully already. Selected by
+  `ZBOTS_CHAT_TRANSPORT` (`embedded` default, `http` opt-in) read once at
+  process start; every session-bookkeeping helper and the resilience
+  retry/rollover logic keep their exact current behavior either way, only
+  the transport underneath changed. `_profile_scope` becomes a no-op
+  under `http` -- scoping happens on the wire via `/p/<profile>/`
+  (requires the `multiplex_profiles` fix above) instead of a contextvar.
+  Not yet flipped on anywhere; will be exercised live on zbots-dev first,
+  per the project plan.
+  - New `_call_handler_http`/`_run_stream_attempt_http`, covered by
+    `tests/test_engine_http_transport.py` (profile-prefix routing,
+    header/body forwarding, transport-failure-becomes-500, and SSE-frame
+    reassembly across a real chunked response's chunk boundaries -- the
+    one thing the old in-memory queue couldn't exercise since every
+    `write()` there was already one whole frame).
+
 ### Added
 - Coding tasks now get delegated to a dedicated "coder" bot instead of
   handled inline: the shared RESPONSE_STYLE guardrail (`persona.py`) tells
