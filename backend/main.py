@@ -306,6 +306,45 @@ def _api_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {API_SERVER_KEY}", "Content-Type": "application/json"}
 
 
+def _provision_profile_api_server_key(profile: str) -> None:
+    """Give a freshly-created profile its own copy of API_SERVER_KEY.
+
+    Real bug found live: with gateway.multiplex_profiles on (required for
+    /p/<profile>/ routing to actually scope to that profile instead of
+    silently falling through to "default" -- see entrypoint.sh's own
+    config.yaml comment), hermes-agent deliberately treats API_SERVER_KEY
+    as a per-profile secret, not a global env var (see vendor's
+    agent/secret_scope.py -- "API_SERVER_KEY is deliberately NOT [global]
+    -- it IS a credential and stays [profile-scoped]"). A profile with no
+    API_SERVER_KEY of its own in its own <profile>/.env can create a
+    session (unauthenticated create), but every SUBSEQUENT call through
+    its /p/<profile>/ prefix -- including _lock_active_session_model()
+    right after this, in the same request -- 401s. Every bot created
+    before this fix needed the same line backfilled by hand; this makes
+    it automatic going forward. Best-effort: a profile whose directory
+    isn't found yet (dash_send above returned before the filesystem
+    settled) shouldn't fail bot creation over a secret that already
+    exists at the container level for "default" and can be added by hand
+    if this silently no-ops.
+    """
+    home = os.environ.get("HERMES_HOME", "")
+    if not home or not API_SERVER_KEY:
+        return
+    env_path = Path(home) / "profiles" / profile / ".env"
+    try:
+        if not env_path.exists():
+            return
+        existing = env_path.read_text(encoding="utf-8")
+        if "API_SERVER_KEY" in existing:
+            return
+        with env_path.open("a", encoding="utf-8") as f:
+            if existing and not existing.endswith("\n"):
+                f.write("\n")
+            f.write(f"API_SERVER_KEY={API_SERVER_KEY}\n")
+    except OSError:
+        pass
+
+
 async def send_to_bot(profile: str, message: str, *, timeout: float = 300.0) -> str:
     state = _read_state()
     active_id = (state.get("active_sessions") or {}).get(profile)
@@ -514,6 +553,7 @@ async def create_bot(body: BotCreate) -> RosterEntry:
             "no_skills": body.no_skills,
         },
     )
+    _provision_profile_api_server_key(name)
     if body.title:
         await _mutate_state(lambda d: d["titles"].__setitem__(name, body.title))
     if body.soul:

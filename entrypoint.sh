@@ -79,6 +79,17 @@ mcp_servers:
 auxiliary:
   title_generation:
     enabled: false
+# Real bug found live: without this, the api_server platform's own
+# /p/<profile>/ URL-prefix routing silently no-ops -- _resolve_request_profile
+# (gateway/platforms/api_server.py) ignores the prefix entirely and treats
+# every request as the "default" profile whenever multiplex_profiles is
+# unset (default False). Confirmed live: a non-default bot's session-lock
+# call (_lock_active_session_model, POST /api/sessions/{id}/model) kept
+# reporting success but never actually took effect until switching to
+# /models/activate instead (which sets the global main slot, unaffected by
+# profile-scoping) -- almost certainly this exact gap, not a separate bug.
+gateway:
+  multiplex_profiles: true
 EOF
 fi
 

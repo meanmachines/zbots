@@ -6,6 +6,32 @@ tagged on `main`.
 
 ## [Unreleased]
 
+### Fixed
+- `gateway.multiplex_profiles` was never set anywhere in zBots' bootstrap
+  config, so it defaulted to `False` -- meaning the real api_server
+  platform's `/p/<profile>/` URL-prefix routing silently no-op'd,
+  treating every request as the "default" profile no matter which
+  profile the URL actually named. Confirmed live: `_lock_active_session_model`'s
+  `POST /api/sessions/{id}/model` call for a non-default bot kept
+  reporting success but never actually took effect, until switching to
+  `/models/activate` (global main slot, unaffected by profile-scoping)
+  worked around it -- this is almost certainly why that bug existed at
+  all. Fixed by adding `gateway: {multiplex_profiles: true}` to
+  `entrypoint.sh`'s bootstrapped config.yaml, applied live to the running
+  volume; verified `/p/coder/api/sessions` and `/p/butler/api/sessions`
+  now each return only that bot's own session, not the merged pool of
+  all 50+ sessions across every bot.
+  - Turning multiplexing on surfaced a second real gap: hermes-agent
+    deliberately treats `API_SERVER_KEY` as a per-profile secret once
+    multiplexing is active (not a global env var -- see vendor's
+    `agent/secret_scope.py`), so every existing bot's own `<profile>/.env`
+    needed the same key backfilled by hand, and any *new* bot would hit
+    the identical bug the moment it tried to lock its own session. Fixed
+    with `_provision_profile_api_server_key()` in `main.py`, called from
+    `create_bot()` right before the existing session-lock call that
+    depends on it -- verified live against a fresh bot, `.env` populated
+    automatically, real chat round-trip works.
+
 ### Added
 - Coding tasks now get delegated to a dedicated "coder" bot instead of
   handled inline: the shared RESPONSE_STYLE guardrail (`persona.py`) tells
