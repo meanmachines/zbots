@@ -789,7 +789,7 @@ def test_shutdown_handler_is_a_noop_under_embedded_transport(monkeypatch):
     assert stop_calls == []
 
 
-def test_idle_reap_loop_sweeps_using_roster_activity(monkeypatch):
+def test_bot_lifecycle_sweep_loop_reaps_using_roster_activity(monkeypatch):
     async def fake_get_roster(include_hidden=False):
         return [
             m.RosterEntry(name="default", title="Default", description="", last_active=1000.0),
@@ -809,13 +809,97 @@ def test_idle_reap_loop_sweeps_using_roster_activity(monkeypatch):
     monkeypatch.setattr(m, "get_roster", fake_get_roster)
     monkeypatch.setattr(m, "_keep_warm_bots", AsyncMock(return_value={"default"}))
     monkeypatch.setattr(m.bot_processes, "reap_idle", fake_reap)
+    monkeypatch.setattr(m.bot_processes, "ensure_bot_process_running", AsyncMock(return_value=8700))
     monkeypatch.setattr(m.asyncio, "sleep", sleep_once_then_stop)
 
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(m._idle_reap_loop())
+        asyncio.run(m._bot_lifecycle_sweep_loop())
 
     assert len(reap_calls) == 1
     idle_since, keep_warm, threshold_s = reap_calls[0]
     assert idle_since == {"default": 1000.0, "coder": 1.0}
     assert keep_warm == {"default"}
     assert threshold_s == m.IDLE_REAP_SECONDS
+
+
+def test_bot_lifecycle_sweep_loop_re_ensures_keep_warm_bots(monkeypatch):
+    # Real bug this guards against: a keep-warm bot that failed to boot
+    # (or was manually stopped) needs a recurring retry, not just a
+    # single startup-time attempt -- otherwise it stays down forever.
+    async def fake_get_roster(include_hidden=False):
+        return [m.RosterEntry(name="default", title="Default", description="")]
+
+    spawn_calls = []
+
+    async def fake_wake(profile):
+        spawn_calls.append(profile)
+        return 8700
+
+    async def sleep_once_then_stop(_seconds):
+        if spawn_calls:
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(m, "get_roster", fake_get_roster)
+    monkeypatch.setattr(m, "_keep_warm_bots", AsyncMock(return_value={"default"}))
+    monkeypatch.setattr(m.bot_processes, "reap_idle", AsyncMock(return_value=[]))
+    monkeypatch.setattr(m.bot_processes, "ensure_bot_process_running", fake_wake)
+    monkeypatch.setattr(m.asyncio, "sleep", sleep_once_then_stop)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(m._bot_lifecycle_sweep_loop())
+
+    assert spawn_calls == ["default"]
+
+
+# ---------------------------------------------------------------------------
+# _get_roster_with_retry -- real bug found live: the FastAPI backend's own
+# startup event can fire before the dashboard (a separate process started
+# in its own background subshell) is actually accepting connections yet,
+# so a single-attempt get_roster() at startup silently failed and
+# "default" was never spawned under ZBOTS_CHAT_TRANSPORT=http.
+# ---------------------------------------------------------------------------
+
+def test_get_roster_with_retry_succeeds_on_a_later_attempt(monkeypatch):
+    attempts = {"n": 0}
+
+    async def flaky_get_roster(include_hidden=False):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise m.httpx.ConnectError("dashboard not up yet")
+        return [m.RosterEntry(name="default", title="Default", description="")]
+
+    monkeypatch.setattr(m, "get_roster", flaky_get_roster)
+    monkeypatch.setattr(m.asyncio, "sleep", AsyncMock())
+
+    roster = asyncio.run(m._get_roster_with_retry(attempts=5, delay_s=0))
+    assert attempts["n"] == 3
+    assert roster[0].name == "default"
+
+
+def test_get_roster_with_retry_raises_after_exhausting_every_attempt(monkeypatch):
+    async def always_fails(include_hidden=False):
+        raise m.httpx.ConnectError("dashboard never came up")
+
+    monkeypatch.setattr(m, "get_roster", always_fails)
+    monkeypatch.setattr(m.asyncio, "sleep", AsyncMock())
+
+    with pytest.raises(m.httpx.ConnectError):
+        asyncio.run(m._get_roster_with_retry(attempts=3, delay_s=0))
+
+
+def test_startup_handler_uses_the_retrying_roster_fetch(monkeypatch):
+    monkeypatch.setattr(m._engine, "_use_http", lambda: True)
+    monkeypatch.setattr(m.asyncio, "create_task", lambda coro: coro.close())
+
+    retry_calls = []
+
+    async def fake_retry(**kwargs):
+        retry_calls.append(kwargs)
+        return [m.RosterEntry(name="default", title="Default", description="")]
+
+    monkeypatch.setattr(m, "_get_roster_with_retry", fake_retry)
+    monkeypatch.setattr(m, "_keep_warm_bots", AsyncMock(return_value={"default"}))
+    monkeypatch.setattr(m.bot_processes, "ensure_bot_process_running", AsyncMock(return_value=8700))
+
+    asyncio.run(m._spawn_keep_warm_bots_and_start_reaper())
+    assert len(retry_calls) == 1

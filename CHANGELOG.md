@@ -92,6 +92,24 @@ tagged on `main`.
     zbots-dev was already at ~55% of its 1024MB budget idle under the old
     architecture. `mcp__zorc__request_memory_increase`/`approve_action`
     is the known-working path once real numbers are in hand.
+  - Real bug found live, deploying this: `ZBOTS_CHAT_TRANSPORT` had
+    carried over as `http` from earlier Phase 1 testing, so this landed
+    live immediately -- and the startup handler's single-attempt
+    `get_roster()` call raced the dashboard process (a separate
+    background subshell in `entrypoint.sh`, no explicit ordering/wait
+    against the FastAPI backend's own startup) not being ready yet,
+    failed, and silently gave up: `default`'s worker never spawned, chat
+    broken container-wide until a manual redeploy. Fixed two ways: new
+    `_get_roster_with_retry()` (5 attempts, 2s apart) absorbs the
+    ordinary startup race directly; the periodic sweep (renamed
+    `_idle_reap_loop` -> `_bot_lifecycle_sweep_loop`, extracted
+    `_ensure_keep_warm_bots_running()` shared by both) now re-ensures
+    every keep-warm bot on each cycle instead of only ever trying once at
+    boot, so a keep-warm bot that failed to start (or was manually
+    stopped) self-heals within one `IDLE_REAP_INTERVAL_SECONDS` instead
+    of staying down forever. Restored service by reverting zbots-dev to
+    `embedded` immediately on discovery; redeployed with the fix before
+    considering `http` again. Covered by new tests in `test_backend.py`.
 
 ### Fixed
 - `gateway.multiplex_profiles` was never set anywhere in zBots' bootstrap

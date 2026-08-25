@@ -1824,42 +1824,80 @@ async def _keep_warm_bots(profile_names: list[str]) -> set[str]:
     return keep_warm
 
 
-@app.on_event("startup")
-async def _spawn_keep_warm_bots_and_start_reaper() -> None:
-    if not _engine._use_http():
-        return
-    asyncio.create_task(_idle_reap_loop())
-    try:
-        roster = await get_roster(include_hidden=True)
-    except Exception:
-        return  # dashboard not reachable yet -- the next reap cycle (or a real chat request) will catch up
-    keep_warm = await _keep_warm_bots([e.name for e in roster])
+async def _get_roster_with_retry(*, attempts: int = 5, delay_s: float = 2.0) -> list[RosterEntry]:
+    """Real bug found live: the FastAPI backend's own startup event can
+    fire before the dashboard (a separate process, port 9119, started in
+    its own background subshell by entrypoint.sh with no explicit
+    ordering/wait between the two) is actually accepting connections yet
+    -- confirmed live, get_roster() at startup time failed with a
+    connection error, the old single-attempt startup handler silently
+    gave up on the whole keep-warm spawn, and "default" was never
+    started at all under ZBOTS_CHAT_TRANSPORT=http (chat broken until the
+    next manual redeploy). A short retry loop absorbs that ordinary
+    startup race without needing to reorder entrypoint.sh's own process
+    launches.
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(attempts):
+        try:
+            return await get_roster(include_hidden=True)
+        except Exception as exc:
+            last_exc = exc
+            if attempt < attempts - 1:
+                await asyncio.sleep(delay_s)
+    raise last_exc  # type: ignore[misc]
+
+
+async def _ensure_keep_warm_bots_running(keep_warm: set[str]) -> None:
     results = await asyncio.gather(
         *(bot_processes.ensure_bot_process_running(name) for name in keep_warm),
         return_exceptions=True,
     )
-    for name, result in zip(keep_warm, results):
+    for _name, result in zip(keep_warm, results):
         if isinstance(result, Exception):
             # Best-effort: one keep-warm bot failing to boot (a bad
             # provider config, a genuinely unreachable model endpoint)
-            # shouldn't take the whole container down -- it just stays
-            # asleep until the next reap cycle retries it, or a chat
-            # request wakes it directly.
+            # shouldn't take the whole container down -- the next
+            # lifecycle sweep retries it, or a chat request wakes it
+            # directly.
             pass
 
 
-async def _idle_reap_loop() -> None:
+@app.on_event("startup")
+async def _spawn_keep_warm_bots_and_start_reaper() -> None:
+    if not _engine._use_http():
+        return
+    asyncio.create_task(_bot_lifecycle_sweep_loop())
+    try:
+        roster = await _get_roster_with_retry()
+    except Exception:
+        # Dashboard still unreachable after every retry -- the periodic
+        # sweep below (same self-healing logic, not just a startup-only
+        # attempt) will keep trying every IDLE_REAP_INTERVAL_SECONDS.
+        return
+    keep_warm = await _keep_warm_bots([e.name for e in roster])
+    await _ensure_keep_warm_bots_running(keep_warm)
+
+
+async def _bot_lifecycle_sweep_loop() -> None:
+    """Periodic self-healing sweep: re-ensures every keep-warm bot is
+    actually running (not just a startup-time attempt -- a keep-warm bot
+    that failed to boot, or was manually stopped, stays down forever
+    otherwise) AND reaps idle on-demand bots. Same roster read powers
+    both halves of one sweep.
+    """
     while True:
         await asyncio.sleep(IDLE_REAP_INTERVAL_SECONDS)
         try:
             roster = await get_roster(include_hidden=True)
             keep_warm = await _keep_warm_bots([e.name for e in roster])
+            await _ensure_keep_warm_bots_running(keep_warm)
             idle_since = {e.name: e.last_active for e in roster if e.last_active is not None}
             await bot_processes.reap_idle(idle_since=idle_since, keep_warm=keep_warm, threshold_s=IDLE_REAP_SECONDS)
         except Exception:
-            # Best-effort: a failed sweep just means bots stay warm a
-            # little longer than ideal -- never worth crashing the loop
-            # over, the next interval tries again.
+            # Best-effort: a failed sweep just means bots stay warm (or
+            # asleep) a little longer than ideal -- never worth crashing
+            # the loop over, the next interval tries again.
             pass
 
 
