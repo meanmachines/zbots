@@ -394,7 +394,61 @@ async def _sync_profile_provider(profile: str, provider: Optional[str]) -> None:
         await dash_send(
             "PUT", "/api/config", {"config": {"providers": {provider: provider_cfg}}}, query={"profile": profile}
         )
+        _provision_profile_provider_secret(profile, provider_cfg)
     except Exception:
+        pass
+
+
+def _provision_profile_provider_secret(profile: str, provider_cfg: dict) -> None:
+    """Give profile's own .env the API key its newly-synced provider needs.
+
+    Same real bug class as _provision_profile_api_server_key, found live
+    right after fixing that one and re-testing: syncing the providers:
+    block (above) was enough for an unauthenticated endpoint (zBots' own
+    self-hosted sglang providers, no key_env at all) but not for anything
+    with real credentials -- a synced deepseek-flash entry still 401'd
+    with "Authentication Fails ... invalid" the moment a non-default bot
+    tried to chat, because key_env (HERMES_CUSTOM_DEEPSEEK_FLASH_API_KEY)
+    only resolves through the multiplex profile's own .env-backed secret
+    scope (agent/secret_scope.py, same mechanism API_SERVER_KEY needed) --
+    it is NOT read from this container's process-level environment for a
+    scoped profile, confirmed live: the container's own env has no such
+    variable at all, only the root/default profile's own .env does.
+
+    Best-effort, same as its sibling: no key_env on this provider (an
+    unauthenticated endpoint), the value not found in the default
+    profile's own .env, or a filesystem error here shouldn't fail bot
+    creation/update -- the bot still works on the embedded transport
+    either way.
+    """
+    key_env = provider_cfg.get("key_env")
+    if not key_env:
+        return
+    home = os.environ.get("HERMES_HOME", "")
+    if not home:
+        return
+    try:
+        root_env_path = Path(home) / ".env"
+        if not root_env_path.exists():
+            return
+        value = None
+        for line in root_env_path.read_text(encoding="utf-8").splitlines():
+            if line.startswith(f"{key_env}="):
+                value = line[len(key_env) + 1 :]
+                break
+        if value is None:
+            return
+        target_env_path = Path(home) / "profiles" / profile / ".env"
+        if not target_env_path.exists():
+            return
+        existing = target_env_path.read_text(encoding="utf-8")
+        if f"{key_env}=" in existing:
+            return
+        with target_env_path.open("a", encoding="utf-8") as f:
+            if existing and not existing.endswith("\n"):
+                f.write("\n")
+            f.write(f"{key_env}={value}\n")
+    except OSError:
         pass
 
 

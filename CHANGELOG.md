@@ -74,8 +74,26 @@ tagged on `main`.
     real hermes-agent already exposes. Skips built-in routing providers
     (openrouter/auto/custom/anything in `PROVIDER_REGISTRY`) since those
     resolve through native code paths, not a `providers:` entry. Covered
-    by new tests in `test_backend.py`; re-verified live afterward against
-    a non-default bot on zbots-dev with `ZBOTS_CHAT_TRANSPORT=http`.
+    by new tests in `test_backend.py`.
+  - Re-testing after that fix (and after backfilling the `providers:`
+    block into every existing secondary profile -- `butler`, `coder`,
+    `coder-fast`, `hydration-reminder`) surfaced the same gap one layer
+    down: a synced provider with real credentials (`deepseek-flash`)
+    still 401'd for any non-default bot with `"Authentication Fails ...
+    invalid"`, while zBots' own unauthenticated sglang endpoints (`coder`
+    on `sglang-thor`) worked immediately. `key_env` (e.g.
+    `HERMES_CUSTOM_DEEPSEEK_FLASH_API_KEY`) only resolves through the
+    multiplexed profile's own `.env`-backed secret scope, same mechanism
+    `API_SERVER_KEY` needed -- confirmed live the container's own process
+    environment has no such variable at all, only the root/default
+    profile's own `.env` does. Fixed with
+    `_provision_profile_provider_secret()`, called from
+    `_sync_profile_provider()` right after the `providers:` block sync --
+    copies the real key value from the root profile's `.env` into the
+    target profile's own, idempotently, same convention as
+    `_provision_profile_api_server_key()`. No-ops cleanly for an
+    unauthenticated provider (no `key_env` at all). Covered by new tests
+    in `test_backend.py`.
 
 ### Added
 - Coding tasks now get delegated to a dedicated "coder" bot instead of

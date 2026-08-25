@@ -278,6 +278,74 @@ def test_sync_profile_provider_swallows_a_dashboard_failure(monkeypatch):
     asyncio.run(m._sync_profile_provider("coder", "sglang-thor"))  # must not raise
 
 
+# ---------------------------------------------------------------------------
+# _provision_profile_provider_secret -- real bug found live, right after
+# fixing the providers: sync above and re-testing: syncing the block was
+# enough for zBots' own unauthenticated sglang endpoints, but a synced
+# deepseek-flash entry still 401'd for any non-default bot -- key_env only
+# resolves through the multiplex profile's OWN .env (agent/secret_scope.py),
+# never this container's process env, for a scoped profile.
+# ---------------------------------------------------------------------------
+
+def test_provisions_the_key_env_value_from_the_root_profile(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / ".env").write_text("HERMES_CUSTOM_DEEPSEEK_FLASH_API_KEY=sk-real-value\n", encoding="utf-8")
+    profile_dir = tmp_path / "profiles" / "hydration-reminder"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / ".env").write_text("API_SERVER_KEY=abc\n", encoding="utf-8")
+
+    m._provision_profile_provider_secret(
+        "hydration-reminder", {"key_env": "HERMES_CUSTOM_DEEPSEEK_FLASH_API_KEY"}
+    )
+
+    content = (profile_dir / ".env").read_text(encoding="utf-8")
+    assert "HERMES_CUSTOM_DEEPSEEK_FLASH_API_KEY=sk-real-value" in content
+    assert "API_SERVER_KEY=abc" in content  # existing content preserved
+
+
+def test_is_a_noop_when_the_key_already_exists_in_the_profile(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / ".env").write_text("HERMES_CUSTOM_DEEPSEEK_FLASH_API_KEY=sk-real-value\n", encoding="utf-8")
+    profile_dir = tmp_path / "profiles" / "hydration-reminder"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / ".env").write_text("HERMES_CUSTOM_DEEPSEEK_FLASH_API_KEY=sk-already-here\n", encoding="utf-8")
+
+    m._provision_profile_provider_secret(
+        "hydration-reminder", {"key_env": "HERMES_CUSTOM_DEEPSEEK_FLASH_API_KEY"}
+    )
+
+    content = (profile_dir / ".env").read_text(encoding="utf-8")
+    # Never overwritten -- idempotent, same convention as
+    # _provision_profile_api_server_key.
+    assert content.count("HERMES_CUSTOM_DEEPSEEK_FLASH_API_KEY=") == 1
+    assert "sk-already-here" in content
+
+
+def test_is_a_noop_for_an_unauthenticated_provider(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    profile_dir = tmp_path / "profiles" / "coder"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / ".env").write_text("", encoding="utf-8")
+
+    m._provision_profile_provider_secret("coder", {"base_url": "http://thor:30000/v1"})  # no key_env
+
+    assert (profile_dir / ".env").read_text(encoding="utf-8") == ""
+
+
+def test_is_best_effort_when_the_root_env_has_no_such_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / ".env").write_text("SOME_OTHER_KEY=x\n", encoding="utf-8")
+    profile_dir = tmp_path / "profiles" / "hydration-reminder"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / ".env").write_text("", encoding="utf-8")
+
+    m._provision_profile_provider_secret(
+        "hydration-reminder", {"key_env": "HERMES_CUSTOM_DEEPSEEK_FLASH_API_KEY"}
+    )  # must not raise
+
+    assert (profile_dir / ".env").read_text(encoding="utf-8") == ""
+
+
 def test_create_bot_syncs_the_provider_into_the_new_profile(client, monkeypatch):
     sync_calls = []
 
