@@ -153,7 +153,12 @@ def test_create_bot_forces_explicit_provider_model(client, monkeypatch):
     created = {}
 
     async def fake_dash_send(method, path, body):
-        created["body"] = body
+        # /api/profiles is the profile-create call this test cares about;
+        # create_bot also unconditionally PUTs a branded soul afterward
+        # (see persona.with_branding_safety's own real-bug comment in
+        # main.py) -- only capture the one this test is actually about.
+        if path == "/api/profiles":
+            created["body"] = body
         return {}
 
     async def fake_default_model():
@@ -170,6 +175,69 @@ def test_create_bot_forces_explicit_provider_model(client, monkeypatch):
     assert resp.status_code == 200
     assert created["body"]["provider"] == "default-prov"
     assert created["body"]["model"] == "default-model"
+
+
+# ---------------------------------------------------------------------------
+# Real bug found live: create_bot used to only PUT a soul when the caller
+# explicitly supplied one (`if body.soul: ...`), so a bot created with no
+# soul field (the common case) never got persona.py's branded default at
+# all -- it fell straight back to hermes-agent's own raw stock persona ("You
+# are Hermes Agent... created by Nous Research"). Confirmed live: 6 of 9
+# real bots on zbots-dev had exactly this, including two created earlier the
+# same session with no soul set. persona.with_branding_safety(body.soul) is
+# now called unconditionally.
+# ---------------------------------------------------------------------------
+
+def test_create_bot_applies_the_branded_default_soul_when_none_given(client, monkeypatch):
+    soul_calls = []
+
+    async def fake_dash_send(method, path, body=None, query=None):
+        if path == "/api/profiles/alpha/soul":
+            soul_calls.append(body["content"])
+        return {}
+
+    async def fake_default_model():
+        return "default-prov", "default-model"
+
+    async def fake_get_roster(include_hidden=False):
+        return [m.RosterEntry(name="alpha", title="Alpha", description="")]
+
+    monkeypatch.setattr(m, "dash_send", fake_dash_send)
+    monkeypatch.setattr(m, "_default_model", fake_default_model)
+    monkeypatch.setattr(m, "get_roster", fake_get_roster)
+    monkeypatch.setattr(m, "_infer_bot_category", AsyncMock(return_value="general"))
+
+    resp = client.post("/bots", json={"name": "alpha", "title": "Alpha", "description": "d"})
+    assert resp.status_code == 200
+    assert soul_calls == [m.persona.DEFAULT_SOUL]
+
+
+def test_create_bot_still_adds_branding_safety_to_a_custom_soul(client, monkeypatch):
+    soul_calls = []
+
+    async def fake_dash_send(method, path, body=None, query=None):
+        if path == "/api/profiles/alpha/soul":
+            soul_calls.append(body["content"])
+        return {}
+
+    async def fake_default_model():
+        return "default-prov", "default-model"
+
+    async def fake_get_roster(include_hidden=False):
+        return [m.RosterEntry(name="alpha", title="Alpha", description="")]
+
+    monkeypatch.setattr(m, "dash_send", fake_dash_send)
+    monkeypatch.setattr(m, "_default_model", fake_default_model)
+    monkeypatch.setattr(m, "get_roster", fake_get_roster)
+    monkeypatch.setattr(m, "_infer_bot_category", AsyncMock(return_value="general"))
+
+    resp = client.post(
+        "/bots",
+        json={"name": "alpha", "title": "Alpha", "description": "d", "soul": "You are a research specialist."},
+    )
+    assert resp.status_code == 200
+    assert soul_calls[0].startswith("You are a research specialist.")
+    assert m.persona.BRANDING_SAFETY in soul_calls[0]
 
 
 def test_update_bot_locks_active_session_model(client, monkeypatch):
@@ -1303,6 +1371,79 @@ def test_update_bot_sets_an_explicit_category_override(client, monkeypatch):
     assert state["categories"]["alpha"] == "supervisor"
 
 
+def test_create_bot_tunes_the_profile_when_category_is_developer(client, monkeypatch):
+    tuning_calls = []
+
+    async def fake_dash_send(method, path, body=None, query=None):
+        if path == "/api/config":
+            tuning_calls.append((body, query))
+        return {}
+
+    async def fake_default_model():
+        return "default-prov", "default-model"
+
+    async def fake_get_roster(include_hidden=False):
+        return [m.RosterEntry(name="alpha", title="Alpha", description="")]
+
+    monkeypatch.setattr(m, "dash_send", fake_dash_send)
+    monkeypatch.setattr(m, "_default_model", fake_default_model)
+    monkeypatch.setattr(m, "get_roster", fake_get_roster)
+    monkeypatch.setattr(m.bot_processes, "ensure_bot_process_running", AsyncMock(return_value=8700))
+
+    resp = client.post("/bots", json={"name": "alpha", "description": "d", "category": "developer"})
+    assert resp.status_code == 200
+    assert len(tuning_calls) == 1
+    body, query = tuning_calls[0]
+    assert query == {"profile": "alpha"}
+    assert body["config"] == m._DEVELOPER_PROFILE_TUNING
+
+
+def test_create_bot_does_not_tune_the_profile_for_a_non_developer_category(client, monkeypatch):
+    tuning_calls = []
+
+    async def fake_dash_send(method, path, body=None, query=None):
+        if path == "/api/config":
+            tuning_calls.append((body, query))
+        return {}
+
+    async def fake_default_model():
+        return "default-prov", "default-model"
+
+    async def fake_get_roster(include_hidden=False):
+        return [m.RosterEntry(name="alpha", title="Alpha", description="")]
+
+    monkeypatch.setattr(m, "dash_send", fake_dash_send)
+    monkeypatch.setattr(m, "_default_model", fake_default_model)
+    monkeypatch.setattr(m, "get_roster", fake_get_roster)
+    monkeypatch.setattr(m.bot_processes, "ensure_bot_process_running", AsyncMock(return_value=8700))
+
+    resp = client.post("/bots", json={"name": "alpha", "description": "d", "category": "general"})
+    assert resp.status_code == 200
+    assert tuning_calls == []
+
+
+def test_update_bot_tunes_the_profile_when_switched_to_developer(client, monkeypatch):
+    tuning_calls = []
+
+    async def fake_dash_send(method, path, body=None, query=None):
+        if path == "/api/config":
+            tuning_calls.append((body, query))
+        return {}
+
+    monkeypatch.setattr(m, "dash_send", fake_dash_send)
+    resp = client.patch("/bots/coder", json={"category": "developer"})
+    assert resp.status_code == 200
+    assert len(tuning_calls) == 1
+    body, query = tuning_calls[0]
+    assert query == {"profile": "coder"}
+    assert body["config"] == m._DEVELOPER_PROFILE_TUNING
+
+
+def test_tune_developer_profile_is_best_effort(monkeypatch):
+    monkeypatch.setattr(m, "dash_send", AsyncMock(side_effect=RuntimeError("boom")))
+    asyncio.run(m._tune_developer_profile("coder"))  # must not raise
+
+
 def test_update_bot_rejects_an_invalid_category(client):
     resp = client.patch("/bots/alpha", json={"category": "not-a-real-category"})
     assert resp.status_code == 400
@@ -1404,3 +1545,74 @@ def test_mcp_catalog_endpoint_leaves_docs_url_untouched(client, monkeypatch):
     )
     body = client.get("/mcp/catalog").json()
     assert body["integrations"][0]["docs_url"] == "https://hermes-agent.nousresearch.com/docs/x"
+
+
+# ---------------------------------------------------------------------------
+# POST /bots/{name}/steer -- redirect a bot while it's still actively
+# working, instead of queuing a new turn for after it finishes. Real,
+# native hermes-agent capability (POST /v1/runs/{run_id}/steer), found by
+# reading a real steering incident live off the user's own hermes-agent
+# desktop app mid-build.
+# ---------------------------------------------------------------------------
+
+def test_steer_uses_the_live_run_id_when_a_stream_is_in_flight(client, monkeypatch):
+    m._active_streams["alpha"] = {"run_id": "run_abc"}
+    steer_calls = []
+
+    async def fake_steer_run(profile, run_id, text, api_key):
+        steer_calls.append((profile, run_id, text))
+        return {"accepted": True}
+
+    monkeypatch.setattr(m._engine, "steer_run", fake_steer_run)
+    try:
+        resp = client.post("/bots/alpha/steer", json={"text": "keep going"})
+    finally:
+        m._active_streams.pop("alpha", None)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"steered": True}
+    assert steer_calls == [("alpha", "run_abc", "keep going")]
+
+
+def test_steer_falls_back_to_a_normal_message_with_no_live_run(client, monkeypatch):
+    m._active_streams.pop("alpha", None)  # confirm test isolation -- nothing left over
+    monkeypatch.setattr(m, "send_to_bot", AsyncMock(return_value="a reply"))
+
+    resp = client.post("/bots/alpha/steer", json={"text": "hello"})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"steered": False, "reply": "a reply"}
+
+
+def test_steer_falls_back_to_a_normal_message_when_the_real_api_rejects_it(client, monkeypatch):
+    # Real, expected case, not an error: the run finished in the gap
+    # between the client seeing it as "still active" and the steer
+    # actually landing.
+    m._active_streams["alpha"] = {"run_id": "run_abc"}
+    monkeypatch.setattr(m._engine, "steer_run", AsyncMock(return_value={"accepted": False}))
+    monkeypatch.setattr(m, "send_to_bot", AsyncMock(return_value="a fallback reply"))
+    try:
+        resp = client.post("/bots/alpha/steer", json={"text": "keep going"})
+    finally:
+        m._active_streams.pop("alpha", None)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"steered": False, "reply": "a fallback reply"}
+
+
+def test_steer_falls_back_when_steer_run_itself_raises(client, monkeypatch):
+    m._active_streams["alpha"] = {"run_id": "run_abc"}
+    monkeypatch.setattr(m._engine, "steer_run", AsyncMock(side_effect=RuntimeError("boom")))
+    monkeypatch.setattr(m, "send_to_bot", AsyncMock(return_value="a fallback reply"))
+    try:
+        resp = client.post("/bots/alpha/steer", json={"text": "keep going"})
+    finally:
+        m._active_streams.pop("alpha", None)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"steered": False, "reply": "a fallback reply"}
+
+
+def test_steer_requires_non_empty_text(client):
+    resp = client.post("/bots/alpha/steer", json={"text": "   "})
+    assert resp.status_code == 400

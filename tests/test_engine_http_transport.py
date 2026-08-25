@@ -145,6 +145,33 @@ def test_json_body_and_headers_are_forwarded(monkeypatch):
     assert seen["auth"] == "Bearer secret"
 
 
+def test_chat_call_timeout_is_hours_not_seconds(monkeypatch):
+    # Real bug found live: this was a flat 120.0s, which killed a real
+    # multi-hour agentic turn mid-run and triggered a destructive rollover
+    # (see engine.py's own comment on _call_handler_http for the full
+    # incident). Pins the fix at the boundary a future regression would
+    # most likely reintroduce -- accidentally shrinking it back down.
+    seen = {}
+    real_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={})
+
+    def _client(*args, **kwargs):
+        seen["timeout"] = kwargs.get("timeout")
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "_CHAT_TRANSPORT", "http")
+    monkeypatch.setattr(engine.httpx, "AsyncClient", _client)
+
+    asyncio.run(engine._call_handler("_h", profile="coder", method="GET", path="/api/sessions"))
+
+    timeout = seen["timeout"]
+    assert timeout.connect == 10.0
+    assert timeout.read >= 3600.0  # at least an hour -- a real safety net, not a short cap
+
+
 def test_transport_failure_becomes_a_500_not_an_exception(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("no route to host", request=request)
@@ -168,6 +195,61 @@ def test_default_transport_stays_embedded_when_flag_unset(monkeypatch):
     # "http", matching the plan's "safe fallback" rollout requirement.
     monkeypatch.setattr(engine, "_CHAT_TRANSPORT", "embedded")
     assert engine._use_http() is False
+
+
+# ---------------------------------------------------------------------------
+# steer_run -- POST /v1/runs/{run_id}/steer, the real native mechanism for
+# redirecting a bot while it's still actively working (see its own
+# docstring in engine.py for the real steering incident this was built
+# from, found live on the user's own hermes-agent desktop app).
+# ---------------------------------------------------------------------------
+
+def test_steer_run_returns_not_accepted_under_embedded_transport(monkeypatch):
+    monkeypatch.setattr(engine, "_CHAT_TRANSPORT", "embedded")
+    result = asyncio.run(engine.steer_run("coder", "run_abc", "keep going", "key"))
+    assert result["accepted"] is False
+
+
+def test_steer_run_posts_to_the_bots_own_worker(monkeypatch):
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"object": "hermes.run.steer", "run_id": "run_abc", "accepted": True})
+
+    _use_http_transport(monkeypatch, handler)
+    monkeypatch.setattr(engine.bot_processes, "get_port", lambda profile: 9001)
+
+    result = asyncio.run(engine.steer_run("coder", "run_abc", "keep going", "key"))
+    assert result == {"object": "hermes.run.steer", "run_id": "run_abc", "accepted": True}
+    assert seen["url"] == "http://127.0.0.1:9001/v1/runs/run_abc/steer"
+    assert seen["body"] == {"input": "keep going"}
+
+
+def test_steer_run_reports_not_accepted_on_a_rejected_run(monkeypatch):
+    # A real, expected case -- not an error: the run finished in the gap
+    # between the client seeing it as "still active" and the steer
+    # actually landing. The real API's own 409 run_not_accepting_steer.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"error": {"message": "Run is not currently accepting steer input"}})
+
+    _use_http_transport(monkeypatch, handler)
+    monkeypatch.setattr(engine.bot_processes, "get_port", lambda profile: 9001)
+
+    result = asyncio.run(engine.steer_run("coder", "run_abc", "keep going", "key"))
+    assert result["accepted"] is False
+
+
+def test_steer_run_never_raises_on_a_transport_failure(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no route to host", request=request)
+
+    _use_http_transport(monkeypatch, handler)
+    monkeypatch.setattr(engine.bot_processes, "get_port", lambda profile: 9001)
+
+    result = asyncio.run(engine.steer_run("coder", "run_abc", "keep going", "key"))
+    assert result["accepted"] is False
 
 
 # ---------------------------------------------------------------------------

@@ -70,7 +70,13 @@ function chatKey(sel) {
 
 function updateComposerState() {
   const btn = document.getElementById("send-btn");
-  if (btn) btn.disabled = sendingKeys.has(chatKey(selected));
+  // A bot actively streaming still accepts a new send -- it goes to
+  // /steer instead of a normal message (see sendComposerMessage's own
+  // comment) -- so the button stays enabled for that case. Groups have no
+  // single "run" to steer, so they keep the original blocked-while-
+  // sending behavior.
+  const isSteerable = selected && selected.kind === "bot";
+  if (btn) btn.disabled = !isSteerable && sendingKeys.has(chatKey(selected));
 }
 
 // ---------------------------------------------------------------------
@@ -1499,10 +1505,44 @@ async function sendComposerMessage() {
   // when the response lands.
   const target = selected;
   const key = chatKey(target);
-  if (!target || sendingKeys.has(key)) return;
+  if (!target) return;
   const input = document.getElementById("composer-input");
   const text = input.value.trim();
   if (!text) return;
+
+  // Real gap found live: sending while this exact bot's own reply was
+  // still streaming used to be silently dropped entirely (the guard below
+  // just returned early) -- no way to redirect a bot mid-work the way the
+  // real hermes-agent desktop app's own steering does (confirmed live:
+  // a real, pending mid-build steering message queued against a real
+  // 21.5-hour session). A bot actively streaming gets routed to /steer
+  // instead of blocked; once it goes quiet, this falls through to the
+  // normal send path below exactly as before. Groups have no single "run"
+  // to steer, so they keep the original blocked-while-sending behavior.
+  if (target.kind === "bot" && sendingKeys.has(key)) {
+    input.value = "";
+    appendOptimisticUserMessage(text);
+    try {
+      const result = await apiSend("POST", `/bots/${target.id}/steer`, { text });
+      if (!result.steered && chatKey(selected) === key) {
+        // The run had already finished in the gap between this click and
+        // the steer actually landing -- the backend's own fallback
+        // already sent it as a normal message and has the real reply;
+        // reload to show it like any other send would.
+        await loadMessages();
+      }
+      await refreshRoster();
+    } catch (e) {
+      if (chatKey(selected) === key) {
+        document.getElementById("optimistic-user-msg")?.remove();
+        input.value = text;
+      }
+      toast(`Send to ${target.id} failed: ` + e.message);
+    }
+    return;
+  }
+
+  if (sendingKeys.has(key)) return;
   sendingKeys.add(key);
   const isStillActive = () => chatKey(selected) === key;
   input.value = "";

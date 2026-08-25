@@ -291,7 +291,26 @@ async def _call_handler_http(
     url = f"{_bot_base(profile)}{path}"
     params = {k: v for k, v in (query or {}).items() if v is not None} if query else None
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
+        # Real bug found live: this was 120.0s -- fine for a session
+        # list/create/model-lock call, actively destructive for a real
+        # agentic chat turn (a `developer`-category bot's own tool-calling
+        # loop can legitimately run for hours -- confirmed against a real
+        # 21.5-hour hermes-agent desktop session on the same model zBots'
+        # own "coder" runs). A 120s cap killed the call mid-turn, converted
+        # it to a 500, and handed it to resilience.evaluate() -- which, on
+        # a rollover verdict, threw away the in-progress session and
+        # started a brand-new one with only a text recap, losing the
+        # model's real working state (which files exist, what's left to
+        # do). hermes-agent's own tool_loop_guardrails (warn/optionally
+        # hard-stop on repeated failures) is the correct first line of
+        # defense against a genuinely wedged loop -- this outer timeout is
+        # now just the last-resort safety net for a truly dead worker
+        # (bot_processes.py's own health checks are the real liveness
+        # signal), not something that should fire during real, ongoing
+        # work. connect stays short: this is always a loopback call to the
+        # bot's own already-spawned worker (127.0.0.1), so a slow connect
+        # really does mean something's wrong, unlike a slow response.
+        async with httpx.AsyncClient(timeout=httpx.Timeout(21600.0, connect=10.0)) as client:
             response = await client.request(method, url, headers=headers, json=json_body, params=params)
     except httpx.HTTPError as exc:
         # Mirror _call_handler_embedded's own contract below: a transport
@@ -954,6 +973,51 @@ async def _run_stream_attempt_embedded(profile: str, session_id: str, message: s
             pass
 
 
+# Matches run_id wherever it appears in a raw SSE frame's JSON payload --
+# api_server's own _event_payload stamps it onto every event type, so a
+# plain byte search (not a full per-event-type JSON parse) is enough. See
+# stream_to_bot's own _chunks() for where this is used.
+_RUN_ID_FRAME_RE = re.compile(rb'"run_id"\s*:\s*"([^"]+)"')
+
+
+async def steer_run(profile: str, run_id: str, text: str, api_server_key: str) -> dict:
+    """POST /v1/runs/{run_id}/steer on this bot's own worker -- inject
+    guidance into its currently-running agent loop instead of queuing a
+    new turn for after it finishes. Real, native hermes-agent capability
+    (gateway/platforms/api_server.py's own run-control surface), found by
+    reading a real steering incident live off the user's own hermes-agent
+    desktop app (profiles/coder/desktop/interrupted_turns.json had a real,
+    pending mid-build steering message queued against a real 21.5-hour
+    session) -- that file is desktop-app bookkeeping, but the mechanism it
+    drives is this same REST endpoint, reachable directly.
+
+    HTTP-transport only: this run-scoped control endpoint has no embedded-
+    transport equivalent -- the embedded path was built as a pre-per-bot-
+    worker-architecture fallback with no live, concurrently-reachable agent
+    object a second call could reach into and steer.
+
+    Returns {"accepted": bool, ...} -- never raises; a failed/rejected
+    steer is exactly the "the run already finished in the gap, fall back
+    to a normal message" case main.py's own /bots/{name}/steer handles.
+    """
+    if not _use_http():
+        return {"accepted": False, "reason": "steering requires the http transport"}
+    headers = _api_headers(api_server_key)
+    url = f"{_bot_base(profile)}/v1/runs/{run_id}/steer"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=10.0)) as client:
+            response = await client.post(url, headers=headers, json={"input": text})
+    except httpx.HTTPError as exc:
+        return {"accepted": False, "reason": str(exc)}
+    if response.status_code >= 400:
+        return {"accepted": False, "reason": f"HTTP {response.status_code}"}
+    try:
+        body = response.json()
+    except Exception:
+        return {"accepted": False, "reason": "invalid response"}
+    return body if isinstance(body, dict) else {"accepted": False, "reason": "unexpected response shape"}
+
+
 async def stream_to_bot(
     profile: str,
     message: str,
@@ -1034,6 +1098,22 @@ async def stream_to_bot(
         saw_error = False
         pending: list[bytes] = []
         async for frame, was_error in _run_stream_attempt(profile, state["session_id"], message, headers):
+            # Real bug found live: main.py's own /bots/{name}/steer needs a
+            # run_id to inject guidance into this run while it's still
+            # going (POST /v1/runs/{run_id}/steer -- see steer_run's own
+            # docstring), but nothing captured one before this. api_server
+            # stamps run_id onto EVERY event's payload (_event_payload's
+            # own payload.setdefault), so a plain byte search on whichever
+            # frame arrives first is enough -- no need to touch
+            # _process_sse_frame's own narrower assistant.delta/completed-
+            # only parsing. `state` is the same dict main.py already holds
+            # a live reference to, so this is visible to a concurrent
+            # /steer call the moment it's found, not just after the whole
+            # stream drains.
+            if "run_id" not in state:
+                run_id_match = _RUN_ID_FRAME_RE.search(frame)
+                if run_id_match:
+                    state["run_id"] = run_id_match.group(1).decode("ascii", errors="replace")
             saw_error = saw_error or was_error
             if frame.startswith((b"event: assistant.completed", b"event: run.completed", b"event: error")):
                 pending.append(frame)

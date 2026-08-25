@@ -500,8 +500,55 @@ def _provision_profile_provider_secret(profile: str, provider_cfg: dict) -> None
         pass
 
 
+# The exact settings a real hermes-agent desktop `coder` profile runs
+# with, live-verified against a real 21.5-hour session on the same model
+# zBots' own "coder" runs (state.db: session 20260825_022857_ddc615, 463
+# messages, 230 tool calls, still active). agent.max_turns is deliberately
+# NOT set here -- hermes-agent's own default is already unlimited
+# (hermes_cli/config.py's resolve_turn_limit: an absent value resolves to
+# TURN_LIMIT_UNLIMITED), so leaving it unset gives a developer bot MORE
+# room than the real profile's own deliberate 500-turn ceiling, not less.
+_DEVELOPER_PROFILE_TUNING = {
+    "tool_loop_guardrails": {"hard_stop_enabled": False},
+    "compression": {
+        "enabled": True,
+        "threshold": 0.5,
+        "target_ratio": 0.2,
+        "protect_last_n": 20,
+        "protect_first_n": 3,
+    },
+    "session_reset": {"mode": "none"},
+}
+
+
+async def _tune_developer_profile(profile: str) -> None:
+    """Give a developer-category bot the same config a real, proven
+    multi-hour autonomous session runs with, using the SAME per-profile
+    config-write mechanism _sync_profile_provider already relies on live
+    (PUT /api/config with a profile= query param merges into that
+    profile's own config.yaml -- confirmed working, not a new mechanism).
+    Best-effort, same convention as its sibling: a bot that can't run a
+    marathon session as well as it could have is a worse experience, not
+    a broken one, so a failure here must never fail bot creation/update.
+    """
+    try:
+        await dash_send("PUT", "/api/config", {"config": _DEVELOPER_PROFILE_TUNING}, query={"profile": profile})
+    except Exception:
+        pass
+
+
 def _is_task_category(state: dict, profile: str) -> bool:
     return (state.get("categories") or {}).get(profile) == "task"
+
+
+# profile -> the live session_state dict engine.stream_to_bot() returns,
+# held only for the duration of that bot's own in-flight stream. It's the
+# same dict object the streaming coroutine keeps mutating as new frames
+# arrive (engine.py sets state["run_id"] as soon as it's found), so a
+# concurrent /bots/{name}/steer request landing on this same process can
+# read the current run_id live, mid-stream, not just after it finishes.
+# See steer_bot's own docstring.
+_active_streams: dict[str, dict] = {}
 
 
 async def send_to_bot(profile: str, message: str, *, timeout: float = 300.0) -> str:
@@ -560,8 +607,17 @@ async def stream_to_bot(profile: str, message: str):
     session_state, chunks = await _engine.stream_to_bot(
         profile, message, API_SERVER_KEY, active_id, force_new_session=is_task
     )
-    async for chunk in chunks:
-        yield chunk
+    _active_streams[profile] = session_state
+    try:
+        async for chunk in chunks:
+            yield chunk
+    finally:
+        # Only clear if this is still OUR own entry -- a fast-fired second
+        # message to the same bot (unusual, but not impossible) could have
+        # already overwritten it with its own newer session_state by the
+        # time this one's stream finishes.
+        if _active_streams.get(profile) is session_state:
+            _active_streams.pop(profile, None)
     final_session_id = session_state["session_id"]
     if final_session_id != active_id:
         await _mutate_state(lambda d: d.setdefault("active_sessions", {}).__setitem__(profile, final_session_id))
@@ -853,8 +909,19 @@ async def create_bot(body: BotCreate) -> RosterEntry:
         await _mutate_state(lambda d: d["titles"].__setitem__(name, body.title))
     category = _validate_category(body.category) if body.category else await _infer_bot_category(body.description)
     await _mutate_state(lambda d: d["categories"].__setitem__(name, category))
-    if body.soul:
-        await dash_send("PUT", f"/api/profiles/{name}/soul", {"content": body.soul})
+    if category == "developer":
+        await _tune_developer_profile(name)
+    # Real bug found live: this used to be `if body.soul: ... PUT soul`,
+    # which only ever set a soul when the caller explicitly typed one --
+    # every bot created with an empty soul (the common case) fell straight
+    # back to hermes-agent's own raw stock default ("You are Hermes
+    # Agent... created by Nous Research"), skipping persona.py's branding
+    # guardrails entirely. Confirmed live: 6 of 9 real bots on zbots-dev had
+    # this exact stock persona, including two created this session with no
+    # soul field set. persona.with_branding_safety(body.soul) already
+    # handles "empty -> DEFAULT_SOUL" correctly on its own -- always call
+    # it, unconditionally, so every new bot gets a real branded persona.
+    await dash_send("PUT", f"/api/profiles/{name}/soul", {"content": persona.with_branding_safety(body.soul)})
     _engine.invalidate_adapter()
     if provider and model:
         # Real bug found live: Hermes' own profile-level provider storage
@@ -924,6 +991,8 @@ async def update_bot(name: str, body: BotUpdate) -> dict:
     if body.category is not None:
         category = _validate_category(body.category)
         await _mutate_state(lambda d: d["categories"].__setitem__(name, category))
+        if category == "developer":
+            await _tune_developer_profile(name)
     if body.description is not None:
         await dash_send("PUT", f"/api/profiles/{name}/description", {"description": body.description})
     if body.provider and body.model:
@@ -1147,6 +1216,41 @@ async def bot_send_stream(name: str, body: SendMessage) -> StreamingResponse:
     if not text:
         raise HTTPException(status_code=400, detail="Message text required.")
     return StreamingResponse(stream_to_bot(name, text), media_type="text/event-stream")
+
+
+@app.post("/bots/{name}/steer")
+async def steer_bot(name: str, body: SendMessage) -> dict:
+    """Redirect a bot while it's still actively working, instead of
+    queuing a brand-new turn for after it finishes -- real, native
+    hermes-agent capability (POST /v1/runs/{run_id}/steer), found by
+    reading a real steering incident live off the user's own hermes-agent
+    desktop app mid-build. See engine.steer_run's own docstring for the
+    mechanism and _active_streams' own comment for how the run_id gets
+    here.
+
+    Only makes sense while something is actually running: with no live
+    run for this bot (nothing in flight, or it just finished in the gap),
+    or if the real API rejects the steer (run_not_accepting_steer -- same
+    "finished in the gap" race, just caught server-side instead), this
+    falls back to a normal message rather than surfacing an error the
+    user would have no reason to expect from typing into the same
+    composer they always use.
+    """
+    name = _validate_name(name)
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Message text required.")
+    state = _active_streams.get(name)
+    run_id = state.get("run_id") if state else None
+    if run_id:
+        try:
+            result = await _engine.steer_run(name, run_id, text, API_SERVER_KEY)
+        except Exception:
+            result = {"accepted": False}
+        if result.get("accepted"):
+            return {"steered": True}
+    reply = await send_to_bot(name, text)
+    return {"steered": False, "reply": reply}
 
 
 # --------------------------------------------------------------------------

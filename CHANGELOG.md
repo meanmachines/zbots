@@ -7,6 +7,73 @@ tagged on `main`.
 ## [Unreleased]
 
 ### Added
+- Multi-hour autonomous "developer" bot sessions with live steering,
+  matching (and improving on) a real 21.5-hour hermes-agent desktop `coder`
+  session read directly off the user's own machine (`state.db`, found via
+  the Electron app's own `backend-ownership.json`) -- see the full write-up
+  in `stateful-prancing-gadget.md`'s plan for the investigation. Key
+  finding: hermes-agent's own agent loop is already unlimited by default
+  (`hermes_cli/config.py`'s `resolve_turn_limit` -- an absent `max_turns`
+  resolves to `TURN_LIMIT_UNLIMITED`) and every real `write_file` call
+  already self-verifies (`"verified"`/`"lint"` in its own return value) --
+  the gap was entirely in zBots' own wrapper, not a missing hermes feature.
+  - **Real bug fixed**: `engine.py`'s `_call_handler_http` hard-capped
+    every plain (non-streaming) chat call at 120 seconds -- what
+    `send_to_bot`/`supervisor_mcp.py`'s `message_bot`/`delegate_task`/
+    routine deliveries all use. A real multi-hour agentic turn got killed
+    mid-run, converted to a 500, and handed to a rollover that threw away
+    the in-progress session for a fresh one with only a text recap --
+    actively destructive to a marathon build. Raised to a 6-hour ceiling
+    (still finite, as a last-resort safety net for a truly dead worker --
+    hermes' own `tool_loop_guardrails` is the correct first line of
+    defense against a genuinely wedged loop, not this outer timeout). The
+    streaming path already had no such cap.
+  - **Real bug fixed**: `create_bot()` only PUT a soul when the caller
+    explicitly supplied one (`if body.soul: ...`) -- every bot created
+    with an empty soul (the common case) fell straight back to
+    hermes-agent's own raw stock persona ("You are Hermes Agent... created
+    by Nous Research"), skipping `persona.py`'s branding guardrails
+    entirely. Confirmed live: 6 of 9 real bots on zbots-dev had exactly
+    this, including two created earlier the same session with no soul
+    set. `persona.with_branding_safety(body.soul)` is now called
+    unconditionally (it already handled "empty -> DEFAULT_SOUL" correctly
+    on its own).
+  - New live steering: `POST /bots/{name}/steer` redirects a bot while
+    it's still actively working, instead of queuing a new turn for after
+    it finishes -- the real gap behind the observation that the real
+    desktop session wasn't fully hands-off (a real, pending mid-build
+    steering message was found live in `interrupted_turns.json` against
+    the exact same 21.5-hour session). Uses hermes-agent's own native
+    `POST /v1/runs/{run_id}/steer` ("inject guidance into a running
+    agent") -- not a new mechanism to build, just never wired up: the
+    same `_handle_session_chat` endpoint zBots' streaming path already
+    calls creates this same `run_id` on every call and stamps it onto
+    every streamed event's own payload, so `engine.py`'s `stream_to_bot`
+    now captures it live (from whichever frame carries it first, no need
+    to touch the narrower assistant.delta/completed-only frame parser)
+    into the same `session_state` dict `main.py` already holds a live
+    reference to for the duration of that stream. Frontend: sending a new
+    message while that exact bot is still streaming now calls `/steer`
+    instead of being silently dropped (the previous behavior -- the
+    composer's own send guard just returned early with no feedback at
+    all); once the bot goes quiet, the composer behaves exactly as
+    before. HTTP-transport only (no embedded-transport equivalent -- that
+    path has no live, concurrently-reachable agent object a second call
+    could reach into).
+  - `developer`-category bots (`coder` first) now get the same
+    `tool_loop_guardrails`/`compression`/`session_reset` tuning the real,
+    proven desktop profile runs with, applied via the SAME per-profile
+    config-write mechanism `_sync_profile_provider` already relies on
+    live (`PUT /api/config` with a `profile=` query param -- not a new
+    mechanism, just reused). `agent.max_turns` deliberately left unset --
+    hermes' own default is already unlimited, more room than the real
+    profile's own deliberate 500-turn ceiling.
+  - `persona.py`'s coding-handoff guidance no longer claims `coder` "runs
+    real external coding-agent CLIs (OpenCode, Qwen Code)" -- the real,
+    proven 21.5-hour session never used one; it's hermes' own native
+    `terminal`/`write_file`/`execute_code`/`todo` tools throughout, on the
+    same model zBots' own `coder` already runs. Updated to describe that
+    directly instead.
 - Real browser push notifications for routine/delegated-task deliveries
   ("browser push notification for a hydration reminder... works even if
   the zBots tab isn't focused" -- requested live). Checked hermes-agent's

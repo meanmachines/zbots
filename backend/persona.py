@@ -101,10 +101,11 @@ RESPONSE_STYLE = (
     "explaining a concept or answering a question about code -- hand it off "
     "instead of doing it yourself: use your message_bot tool to send bot "
     "name \"coder\" the task, in enough detail for it to act (repo/workdir, "
-    "what's needed, any constraints). \"Coder\" runs real external coding-"
-    "agent CLIs (OpenCode, Qwen Code) against a dedicated coding model and "
-    "reports back concrete results. Relay its reply to the user rather than "
-    "re-describing the task in your own words."
+    "what's needed, any constraints). \"Coder\" works directly with its own "
+    "native tools -- terminal, file editing, code execution, task planning "
+    "-- to build and verify real changes itself; it doesn't need to "
+    "delegate the work out to a separate coding CLI. Relay its reply to "
+    "the user rather than re-describing the task in your own words."
 )
 
 DEFAULT_SOUL = (

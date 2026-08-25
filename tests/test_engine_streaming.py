@@ -170,6 +170,50 @@ async def _fake_roll_over(profile, headers, all_sessions):
     return "session-2"
 
 
+# ---------------------------------------------------------------------------
+# run_id capture -- main.py's own /bots/{name}/steer needs a run_id to
+# redirect a bot mid-run (POST /v1/runs/{run_id}/steer). api_server stamps
+# run_id onto every event's own payload, so this just confirms
+# stream_to_bot's own state dict picks it up from whichever frame carries
+# it first, live, without waiting for the whole stream to drain.
+# ---------------------------------------------------------------------------
+
+def test_stream_to_bot_captures_run_id_from_the_first_frame_that_has_it(monkeypatch):
+    attempt = [
+        (_frame("run.started", {"run_id": "run_abc123", "session_id": "session-1"}), False),
+        (_frame("assistant.delta", {"delta": "hi", "run_id": "run_abc123"}), False),
+        (_frame("assistant.completed", {"content": "hi", "run_id": "run_abc123"}), False),
+    ]
+    monkeypatch.setattr(engine, "_run_stream_attempt", _fake_attempt(attempt))
+    monkeypatch.setattr(engine, "_ensure_bot_chat_session", _fake_ensure_session)
+    monkeypatch.setattr(engine, "_roll_over_bot_session", _fake_roll_over)
+
+    async def _run():
+        state, chunks = await engine.stream_to_bot("default", "hi", "key", None)
+        frames = [frame async for frame in chunks]
+        return state, frames
+
+    state, frames = asyncio.run(_run())
+    assert state["run_id"] == "run_abc123"
+    assert len(frames) == 3  # capturing run_id must not drop or alter any frame
+
+
+def test_stream_to_bot_leaves_run_id_unset_when_no_frame_carries_one(monkeypatch):
+    attempt = [(_frame("assistant.delta", {"delta": "hi"}), False)]
+    monkeypatch.setattr(engine, "_run_stream_attempt", _fake_attempt(attempt))
+    monkeypatch.setattr(engine, "_ensure_bot_chat_session", _fake_ensure_session)
+    monkeypatch.setattr(engine, "_roll_over_bot_session", _fake_roll_over)
+
+    async def _run():
+        state, chunks = await engine.stream_to_bot("default", "hi", "key", None)
+        async for _frame_ in chunks:
+            pass
+        return state
+
+    state = asyncio.run(_run())
+    assert "run_id" not in state
+
+
 def test_no_rollover_forwards_every_frame_including_the_real_completion(monkeypatch):
     attempt_1 = [
         (_frame("tool.started", {"tool_name": "list_bots"}), False),
