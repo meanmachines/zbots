@@ -47,6 +47,35 @@ tagged on `main`.
     first visit is a real anti-pattern Chrome's own abuse heuristics can
     penalize, and this app has no way to know if a given load is a first
     visit).
+  - Two real bugs found and fixed live during end-to-end verification
+    (subscribed for real, sent a real test push, heard the notification
+    sound arrive but with no visible title/body -- traced with a real
+    minimal repro against pywebpush directly rather than guessed at):
+    - `_send_one` passed `vapid.private_pem().decode()` (a PEM STRING) as
+      `vapid_private_key` -- pywebpush's own `webpush()` only accepts a
+      real `Vapid` instance, a file path, or its own `Vapid.from_string()`
+      encoding (confirmed by reading pywebpush's own source), not
+      arbitrary PEM text. The PEM string fell through to
+      `Vapid.from_string()` and raised a bare `ValueError` ("Could not
+      deserialize key data... ASN.1 parsing error") *outside*
+      `WebPushException` entirely -- not even caught by `_send_one`'s own
+      except clause, silently killing every send via
+      `send_push_notification`'s outer best-effort try/except (by
+      design, for network failures -- not for a bug that fails 100% of
+      the time). Fixed by passing the real `Vapid` instance directly,
+      which pywebpush uses as-is with no string re-parsing at all.
+    - Once that was fixed, sends succeeded with the wrong-key bug gone
+      but still returned a bare `400 Bad Request` (empty body, no
+      detail) from WNS (Windows' own push endpoint) specifically.
+      `pywebpush.webpush()`'s own default is `ttl=0`; RFC 8030 defines
+      that as "deliver now or drop, never queue" -- WNS rejects it
+      outright rather than honoring it. Fixed with a real, positive
+      default TTL (`PUSH_TTL_SECONDS`, 1 hour) -- confirmed live,
+      identical payload/key, only the TTL changed, real 201 from WNS and
+      a real notification with visible title/body arrived.
+    - Covered by new tests in `test_push.py` (`_send_one` gets a real
+      `Vapid` instance, not a string; `_send_one` calls `pywebpush.webpush`
+      with a positive `ttl`).
 
 ### Fixed
 - Real bug found live: a resilience-triggered rollover (see the

@@ -96,7 +96,7 @@ def test_send_push_notification_calls_send_one_per_subscriber(monkeypatch):
     push.add_subscription({"endpoint": "https://push.example/b"})
     seen = []
 
-    def fake_send_one(subscription_info, payload, vapid_private_pem):
+    def fake_send_one(subscription_info, payload, vapid):
         seen.append(subscription_info["endpoint"])
         parsed = json.loads(payload)
         assert parsed["title"] == "title"
@@ -112,7 +112,7 @@ def test_send_push_notification_prunes_a_stale_subscription(monkeypatch):
     push.add_subscription({"endpoint": "https://push.example/dead"})
     push.add_subscription({"endpoint": "https://push.example/alive"})
 
-    def fake_send_one(subscription_info, payload, vapid_private_pem):
+    def fake_send_one(subscription_info, payload, vapid):
         return subscription_info["endpoint"] if subscription_info["endpoint"].endswith("dead") else None
 
     monkeypatch.setattr(push, "_send_one", fake_send_one)
@@ -135,7 +135,7 @@ def test_send_push_notification_truncates_a_long_body():
     push.add_subscription({"endpoint": "https://push.example/a"})
     seen_payload = {}
 
-    def fake_send_one(subscription_info, payload, vapid_private_pem):
+    def fake_send_one(subscription_info, payload, vapid):
         seen_payload["value"] = json.loads(payload)
         return None
 
@@ -144,3 +144,52 @@ def test_send_push_notification_truncates_a_long_body():
     with unittest.mock.patch.object(push, "_send_one", fake_send_one):
         asyncio.run(push.send_push_notification("title", "x" * 1000))
     assert len(seen_payload["value"]["body"]) == 500
+
+
+def test_send_push_notification_passes_the_real_vapid_instance(monkeypatch):
+    # Real bug found live: passing vapid.private_pem().decode() (a PEM
+    # STRING) here instead of the real Vapid object made every send fail
+    # with a bare ValueError ("Could not deserialize key data... ASN.1
+    # parsing error") outside WebPushException entirely -- not even
+    # caught by _send_one's own except clause, silently killing every
+    # notification via this function's outer try/except. pywebpush's own
+    # webpush() only handles a Vapid instance, a file path, or its own
+    # from_string() encoding -- not arbitrary PEM text (confirmed by
+    # reading pywebpush's own source).
+    push.add_subscription({"endpoint": "https://push.example/a"})
+    seen = {}
+
+    def fake_send_one(subscription_info, payload, vapid):
+        seen["vapid"] = vapid
+        return None
+
+    monkeypatch.setattr(push, "_send_one", fake_send_one)
+    asyncio.run(push.send_push_notification("title", "body"))
+    from py_vapid import Vapid
+
+    assert isinstance(seen["vapid"], Vapid)
+    assert not isinstance(seen["vapid"], (str, bytes))
+
+
+def test_send_one_calls_webpush_with_the_vapid_instance_and_a_real_ttl(monkeypatch):
+    # Real bug found live: pywebpush's own default ttl=0 gets a bare
+    # "400 Bad Request" with no error detail from WNS (Windows' own push
+    # endpoint) -- RFC 8030 defines ttl=0 as "deliver now or drop, never
+    # queue," which WNS specifically rejects outright rather than
+    # honoring. Confirmed live against a real subscription: the send
+    # succeeded (201) the moment a positive ttl was set, identical
+    # payload/key otherwise.
+    calls = {}
+
+    def fake_webpush(**kwargs):
+        calls.update(kwargs)
+        return "ok"
+
+    monkeypatch.setattr(push, "PUSH_TTL_SECONDS", 3600)
+    import pywebpush
+
+    monkeypatch.setattr(pywebpush, "webpush", fake_webpush)
+    vapid = push._get_vapid()
+    push._send_one({"endpoint": "https://push.example/a"}, '{"title":"t"}', vapid)
+    assert calls["vapid_private_key"] is vapid
+    assert calls["ttl"] == 3600

@@ -109,9 +109,37 @@ def remove_subscription(endpoint: str) -> None:
         _write_subscriptions(remaining)
 
 
-def _send_one(subscription_info: dict, payload: str, vapid_private_pem: str) -> Optional[str]:
+# RFC 8030's own semantics for ttl=0: "deliver now or drop, never queue."
+# Real bug found live: WNS (Windows' own push endpoint -- confirmed
+# against a real subscription, wns2-am3p.notify.windows.com) rejects a
+# ttl=0 send outright with a bare "400 Bad Request", empty body, no error
+# detail at all -- pywebpush's own default is ttl=0, so every send failed
+# silently (WebPushException caught, treated as "transient, try again
+# next time" by _send_one, no notification ever delivered) until this was
+# set explicitly. An hour is plenty for a reminder someone's meant to see
+# soon; not RFC 8030's own max (2,419,200s / 4 weeks) since a very stale
+# reminder arriving hours late is arguably worse than it just not
+# arriving at all.
+PUSH_TTL_SECONDS = int(os.environ.get("PUSH_TTL_SECONDS", "3600"))
+
+
+def _send_one(subscription_info: dict, payload: str, vapid) -> Optional[str]:
     """Runs pywebpush's own synchronous (requests-based) send -- call via
     asyncio.to_thread, never directly on the event loop.
+
+    `vapid` is the real py_vapid.Vapid instance, not its PEM text. Real
+    bug found live: pywebpush's own `vapid_private_key` accepts a Vapid
+    instance OR a file PATH string OR py_vapid's own "encoded str" format
+    (confirmed by reading pywebpush's own webpush() source) -- NOT a full
+    PEM string. Passing `vapid.private_pem().decode()` (this module's own
+    first attempt) isn't a file path, so it fell into
+    `Vapid.from_string()`, which failed to parse full PEM text and raised
+    a bare `ValueError` OUTSIDE WebPushException entirely -- not even
+    caught by the `except WebPushException` below, silently killing every
+    send via send_push_notification's own outer best-effort try/except.
+    Passing the real instance sidesteps the whole string-format ambiguity
+    (pywebpush uses it as-is, confirmed live: the ASN.1 parse error
+    disappeared entirely once this changed).
 
     Returns the subscription's endpoint if it should be pruned (the push
     service itself reports the subscription is gone -- 404/410, meaning
@@ -125,8 +153,9 @@ def _send_one(subscription_info: dict, payload: str, vapid_private_pem: str) -> 
         webpush(
             subscription_info=subscription_info,
             data=payload,
-            vapid_private_key=vapid_private_pem,
+            vapid_private_key=vapid,
             vapid_claims={"sub": VAPID_SUBJECT},
+            ttl=PUSH_TTL_SECONDS,
         )
         return None
     except WebPushException as exc:
@@ -147,14 +176,13 @@ async def send_push_notification(title: str, body: str, url: Optional[str] = Non
         return
     try:
         vapid = _get_vapid()
-        private_pem = vapid.private_pem().decode("utf-8")
     except Exception:
         return
     payload = json.dumps({"title": title, "body": body[:500], "url": url or "/bots/"})
     stale: list[str] = []
     for sub in subs:
         try:
-            endpoint = await asyncio.to_thread(_send_one, sub, payload, private_pem)
+            endpoint = await asyncio.to_thread(_send_one, sub, payload, vapid)
         except Exception:
             endpoint = None
         if endpoint:
