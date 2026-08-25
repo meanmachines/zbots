@@ -438,6 +438,7 @@ def test_create_bot_wakes_the_new_bots_worker(client, monkeypatch):
     monkeypatch.setattr(m, "_default_model", fake_default_model)
     monkeypatch.setattr(m, "get_roster", fake_get_roster)
     monkeypatch.setattr(m.bot_processes, "ensure_bot_process_running", fake_wake)
+    monkeypatch.setattr(m, "_infer_bot_category", AsyncMock(return_value="general"))
 
     resp = client.post("/bots", json={"name": "alpha", "title": "Alpha", "description": "d"})
     assert resp.status_code == 200
@@ -553,6 +554,57 @@ def test_send_to_bot_skips_state_write_when_session_id_unchanged(monkeypatch, st
     asyncio.run(m.send_to_bot("alpha", "hello"))
 
     write_spy.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# task-category bots -- deliberately stateless. Real design point: a task
+# bot has no business remembering a previous unrelated ask, so every call
+# ignores whatever session id is on record and always starts fresh
+# (_ensure_bot_chat_session's own unchanged "no active session id ->
+# create new" path does the rest).
+# ---------------------------------------------------------------------------
+
+def test_send_to_bot_ignores_the_stored_session_for_a_task_bot(monkeypatch, state_file):
+    m._write_state({**m._default_state(), "active_sessions": {"quick-answers": "old-sid"}, "categories": {"quick-answers": "task"}})
+    fake_engine_send = AsyncMock(return_value=("a fresh answer", "new-sid"))
+    monkeypatch.setattr(m._engine, "send_to_bot", fake_engine_send)
+
+    asyncio.run(m.send_to_bot("quick-answers", "hello"))
+
+    call_args = fake_engine_send.await_args.args
+    assert call_args[3] is None  # active_session_id passed as None despite the stored "old-sid"
+
+
+def test_send_to_bot_still_uses_the_stored_session_for_a_non_task_bot(monkeypatch, state_file):
+    m._write_state({**m._default_state(), "active_sessions": {"butler": "old-sid"}, "categories": {"butler": "general"}})
+    fake_engine_send = AsyncMock(return_value=("continuing", "old-sid"))
+    monkeypatch.setattr(m._engine, "send_to_bot", fake_engine_send)
+
+    asyncio.run(m.send_to_bot("butler", "hello"))
+
+    call_args = fake_engine_send.await_args.args
+    assert call_args[3] == "old-sid"
+
+
+def test_stream_to_bot_ignores_the_stored_session_for_a_task_bot(monkeypatch, state_file):
+    m._write_state({**m._default_state(), "active_sessions": {"quick-answers": "old-sid"}, "categories": {"quick-answers": "task"}})
+
+    async def fake_engine_stream(profile, message, api_key, active_session_id):
+        assert active_session_id is None
+        return {"session_id": "new-sid"}, _empty_async_iter()
+
+    monkeypatch.setattr(m._engine, "stream_to_bot", fake_engine_stream)
+
+    async def drain():
+        async for _chunk in m.stream_to_bot("quick-answers", "hello"):
+            pass
+
+    asyncio.run(drain())
+
+
+async def _empty_async_iter():
+    return
+    yield  # pragma: no cover -- makes this an async generator
 
 
 # ---------------------------------------------------------------------------
@@ -706,6 +758,63 @@ def test_keep_warm_bots_ignores_a_disabled_routine(monkeypatch):
 
     monkeypatch.setattr(m, "dash_get", fake_dash_get)
     warm = asyncio.run(m._keep_warm_bots(["default", "coder"]))
+    assert warm == {"default"}
+
+
+def test_keep_warm_bots_includes_a_developer_category_bot(monkeypatch, state_file):
+    state_file.write_text(json.dumps({"categories": {"coder": "developer"}}))
+
+    async def fake_dash_get(path, **kwargs):
+        return {"data": []}
+
+    monkeypatch.setattr(m, "dash_get", fake_dash_get)
+    warm = asyncio.run(m._keep_warm_bots(["default", "coder", "botty"]))
+    assert warm == {"default", "coder"}
+
+
+def test_keep_warm_bots_includes_a_chore_category_bot_with_no_routine_yet(monkeypatch, state_file):
+    # A brand-new chore-category bot should be warm from the start, not
+    # only once its own routine happens to exist and be enabled.
+    state_file.write_text(json.dumps({"categories": {"hydration-reminder": "chore"}}))
+
+    async def fake_dash_get(path, **kwargs):
+        return {"data": []}
+
+    monkeypatch.setattr(m, "dash_get", fake_dash_get)
+    warm = asyncio.run(m._keep_warm_bots(["default", "hydration-reminder"]))
+    assert warm == {"default", "hydration-reminder"}
+
+
+def test_keep_warm_bots_includes_a_supervisor_category_bot(monkeypatch, state_file):
+    state_file.write_text(json.dumps({"categories": {"qc-bot": "supervisor"}}))
+
+    async def fake_dash_get(path, **kwargs):
+        return {"data": []}
+
+    monkeypatch.setattr(m, "dash_get", fake_dash_get)
+    warm = asyncio.run(m._keep_warm_bots(["default", "qc-bot"]))
+    assert warm == {"default", "qc-bot"}
+
+
+def test_keep_warm_bots_does_not_include_a_task_category_bot(monkeypatch, state_file):
+    state_file.write_text(json.dumps({"categories": {"quick-answers": "task"}}))
+
+    async def fake_dash_get(path, **kwargs):
+        return {"data": []}
+
+    monkeypatch.setattr(m, "dash_get", fake_dash_get)
+    warm = asyncio.run(m._keep_warm_bots(["default", "quick-answers"]))
+    assert warm == {"default"}
+
+
+def test_keep_warm_bots_does_not_include_a_general_category_bot_without_a_routine(monkeypatch, state_file):
+    state_file.write_text(json.dumps({"categories": {"butler": "general"}}))
+
+    async def fake_dash_get(path, **kwargs):
+        return {"data": []}
+
+    monkeypatch.setattr(m, "dash_get", fake_dash_get)
+    warm = asyncio.run(m._keep_warm_bots(["default", "butler"]))
     assert warm == {"default"}
 
 
@@ -1004,3 +1113,222 @@ def test_get_bot_activity_leaves_a_normal_preview_untouched(monkeypatch):
     monkeypatch.setattr(m._engine, "_list_bot_sessions", fake_list_sessions)
     activity = asyncio.run(m.get_bot_activity("default"))
     assert activity["preview"] == "just a normal message"
+
+
+# ---------------------------------------------------------------------------
+# _infer_bot_category / _validate_category -- bot lifecycle categories,
+# requested live: "it should be inferred [from the description]... and the
+# user can manually change its type as well later if required." See
+# _keep_warm_bots() for what each category actually changes.
+# ---------------------------------------------------------------------------
+
+def test_validate_category_accepts_every_known_value():
+    for c in m.CATEGORIES:
+        assert m._validate_category(c) == c
+
+
+def test_validate_category_is_case_insensitive():
+    assert m._validate_category("CHORE") == "chore"
+
+
+def test_validate_category_rejects_an_unknown_value():
+    with pytest.raises(m.HTTPException):
+        m._validate_category("not-a-real-category")
+
+
+def test_infer_bot_category_skips_the_llm_call_for_an_empty_description(monkeypatch):
+    wake_calls = []
+    monkeypatch.setattr(m.bot_processes, "ensure_bot_process_running", AsyncMock(side_effect=lambda p: wake_calls.append(p)))
+    category = asyncio.run(m._infer_bot_category(""))
+    assert category == "general"
+    assert wake_calls == []
+
+
+def test_infer_bot_category_parses_a_valid_reply(monkeypatch):
+    # http transport, not embedded -- avoids _profile_scope's embedded
+    # branch constructing the real vendored adapter (needs packages not
+    # installed in this test environment); everything this test actually
+    # exercises is mocked regardless of transport.
+    monkeypatch.setattr(m._engine, "_CHAT_TRANSPORT", "http")
+
+    async def fake_create_session(profile, title, headers):
+        assert profile == "default"
+        return "temp-sid"
+
+    async def fake_call_handler(handler_name, *, profile, method, path, json_body=None, headers=None, match_info=None, query=None):
+        assert "chore" in json_body["message"]  # the category menu made it into the prompt
+        return 200, {"message": {"content": "chore"}}
+
+    delete_calls = []
+
+    async def fake_delete(*args, **kwargs):
+        delete_calls.append(kwargs.get("headers"))
+        return _fake_response(200, {})
+
+    monkeypatch.setattr(m.bot_processes, "ensure_bot_process_running", AsyncMock(return_value=8700))
+    monkeypatch.setattr(m._engine, "_create_bot_session", fake_create_session)
+    monkeypatch.setattr(m._engine, "_call_handler", fake_call_handler)
+    monkeypatch.setattr(m.httpx.AsyncClient, "delete", fake_delete)
+
+    category = asyncio.run(m._infer_bot_category("reminds me to drink water every hour"))
+    assert category == "chore"
+    assert len(delete_calls) == 1  # temp session was cleaned up
+
+
+def test_infer_bot_category_falls_back_on_an_unparseable_reply(monkeypatch):
+    monkeypatch.setattr(m._engine, "_CHAT_TRANSPORT", "http")
+
+    async def fake_create_session(profile, title, headers):
+        return "temp-sid"
+
+    async def fake_call_handler(handler_name, **kwargs):
+        return 200, {"message": {"content": "I'm not sure, maybe a general assistant?"}}
+
+    async def fake_delete(*args, **kwargs):
+        return _fake_response(200, {})
+
+    monkeypatch.setattr(m.bot_processes, "ensure_bot_process_running", AsyncMock(return_value=8700))
+    monkeypatch.setattr(m._engine, "_create_bot_session", fake_create_session)
+    monkeypatch.setattr(m._engine, "_call_handler", fake_call_handler)
+    monkeypatch.setattr(m.httpx.AsyncClient, "delete", fake_delete)
+
+    category = asyncio.run(m._infer_bot_category("something ambiguous"))
+    assert category == "general"
+
+
+def test_infer_bot_category_falls_back_on_any_failure(monkeypatch):
+    async def boom(*args, **kwargs):
+        raise RuntimeError("worker unreachable")
+
+    monkeypatch.setattr(m.bot_processes, "ensure_bot_process_running", boom)
+    category = asyncio.run(m._infer_bot_category("a description"))  # must not raise
+    assert category == "general"
+
+
+def test_infer_bot_category_cleans_up_even_when_the_chat_call_fails(monkeypatch):
+    monkeypatch.setattr(m._engine, "_CHAT_TRANSPORT", "http")
+
+    async def fake_create_session(profile, title, headers):
+        return "temp-sid"
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("chat call failed")
+
+    delete_calls = []
+
+    async def fake_delete(*args, **kwargs):
+        delete_calls.append(1)
+        return _fake_response(200, {})
+
+    monkeypatch.setattr(m.bot_processes, "ensure_bot_process_running", AsyncMock(return_value=8700))
+    monkeypatch.setattr(m._engine, "_create_bot_session", fake_create_session)
+    monkeypatch.setattr(m._engine, "_call_handler", boom)
+    monkeypatch.setattr(m.httpx.AsyncClient, "delete", fake_delete)
+
+    category = asyncio.run(m._infer_bot_category("a description"))
+    assert category == "general"
+    assert delete_calls == [1]  # cleanup still ran despite the chat call failing
+
+
+def test_create_bot_uses_an_explicit_category_without_inferring(client, monkeypatch):
+    infer_calls = []
+
+    async def fake_dash_send(method, path, body=None, query=None):
+        return {}
+
+    async def fake_default_model():
+        return "default-prov", "default-model"
+
+    async def fake_get_roster(include_hidden=False):
+        return [m.RosterEntry(name="alpha", title="Alpha", description="", provider="prov-a", model="model-a")]
+
+    monkeypatch.setattr(m, "dash_send", fake_dash_send)
+    monkeypatch.setattr(m, "_default_model", fake_default_model)
+    monkeypatch.setattr(m, "get_roster", fake_get_roster)
+    monkeypatch.setattr(m.bot_processes, "ensure_bot_process_running", AsyncMock(return_value=8700))
+    monkeypatch.setattr(m, "_infer_bot_category", AsyncMock(side_effect=lambda d: infer_calls.append(d)))
+
+    resp = client.post("/bots", json={"name": "alpha", "description": "d", "category": "developer"})
+    assert resp.status_code == 200
+    assert infer_calls == []  # explicit category skips inference entirely
+
+    state = m._read_state()
+    assert state["categories"]["alpha"] == "developer"
+
+
+def test_create_bot_infers_when_no_explicit_category_given(client, monkeypatch):
+    async def fake_dash_send(method, path, body=None, query=None):
+        return {}
+
+    async def fake_default_model():
+        return "default-prov", "default-model"
+
+    async def fake_get_roster(include_hidden=False):
+        return [m.RosterEntry(name="alpha", title="Alpha", description="", provider="prov-a", model="model-a")]
+
+    monkeypatch.setattr(m, "dash_send", fake_dash_send)
+    monkeypatch.setattr(m, "_default_model", fake_default_model)
+    monkeypatch.setattr(m, "get_roster", fake_get_roster)
+    monkeypatch.setattr(m.bot_processes, "ensure_bot_process_running", AsyncMock(return_value=8700))
+    monkeypatch.setattr(m, "_infer_bot_category", AsyncMock(return_value="task"))
+
+    resp = client.post("/bots", json={"name": "alpha", "description": "answers one-off questions"})
+    assert resp.status_code == 200
+    state = m._read_state()
+    assert state["categories"]["alpha"] == "task"
+
+
+def test_update_bot_sets_an_explicit_category_override(client, monkeypatch):
+    async def fake_dash_send(method, path, body=None, query=None):
+        return {}
+
+    monkeypatch.setattr(m, "dash_send", fake_dash_send)
+    resp = client.patch("/bots/alpha", json={"category": "supervisor"})
+    assert resp.status_code == 200
+    state = m._read_state()
+    assert state["categories"]["alpha"] == "supervisor"
+
+
+def test_update_bot_rejects_an_invalid_category(client):
+    resp = client.patch("/bots/alpha", json={"category": "not-a-real-category"})
+    assert resp.status_code == 400
+
+
+def test_roster_reflects_a_bots_category(client, monkeypatch, state_file):
+    state_file.write_text(json.dumps({"categories": {"alpha": "developer"}}))
+    monkeypatch.setattr(m, "dash_get", AsyncMock(return_value={"profiles": [_profile("alpha")]}))
+    monkeypatch.setattr(m, "get_bot_activity", AsyncMock(return_value={}))
+    rows = client.get("/roster").json()
+    assert rows[0]["category"] == "developer"
+
+
+def test_roster_defaults_a_bot_with_no_category_to_general(client, monkeypatch):
+    monkeypatch.setattr(m, "dash_get", AsyncMock(return_value={"profiles": [_profile("alpha")]}))
+    monkeypatch.setattr(m, "get_bot_activity", AsyncMock(return_value={}))
+    rows = client.get("/roster").json()
+    assert rows[0]["category"] == "general"
+
+
+# ---------------------------------------------------------------------------
+# POST /bots/{name}/wake -- opportunistic pre-warm fired when a bot's chat
+# is opened in the UI, before any message is actually sent.
+# ---------------------------------------------------------------------------
+
+def test_wake_ensures_the_bots_worker_is_running(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        m.bot_processes, "ensure_bot_process_running", AsyncMock(side_effect=lambda p: calls.append(p))
+    )
+    resp = client.post("/bots/alpha/wake")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    assert calls == ["alpha"]
+
+
+def test_wake_never_fails_the_request_when_the_worker_fails_to_start(client, monkeypatch):
+    monkeypatch.setattr(
+        m.bot_processes, "ensure_bot_process_running", AsyncMock(side_effect=RuntimeError("boom"))
+    )
+    resp = client.post("/bots/alpha/wake")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}

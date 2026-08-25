@@ -112,6 +112,13 @@ def _default_state() -> dict[str, Any]:
         # providers) -- the roster prefers this over the profile's own
         # value when present, since it's the one guaranteed correct.
         "locked_models": {},
+        # A bot's own lifecycle category -- zBots' own concept, not a
+        # hermes-agent-native one, so it lives here rather than in the
+        # profile's own config.yaml. See _infer_bot_category()'s own
+        # docstring and CATEGORIES below for what each value means; a bot
+        # with no entry here is "general" (the implicit default, covers
+        # every bot that existed before this feature).
+        "categories": {},
     }
 
 
@@ -144,6 +151,7 @@ def _read_state() -> dict[str, Any]:
     data.setdefault("titles", {})
     data.setdefault("active_sessions", {})
     data.setdefault("locked_models", {})
+    data.setdefault("categories", {})
     return data
 
 
@@ -487,6 +495,10 @@ def _provision_profile_provider_secret(profile: str, provider_cfg: dict) -> None
         pass
 
 
+def _is_task_category(state: dict, profile: str) -> bool:
+    return (state.get("categories") or {}).get(profile) == "task"
+
+
 async def send_to_bot(profile: str, message: str, *, timeout: float = 300.0) -> str:
     # A no-op under the embedded transport (no per-bot worker exists at
     # all there -- one shared in-process adapter serves every profile).
@@ -497,7 +509,14 @@ async def send_to_bot(profile: str, message: str, *, timeout: float = 300.0) -> 
     if _engine._use_http():
         await bot_processes.ensure_bot_process_running(profile)
     state = _read_state()
-    active_id = (state.get("active_sessions") or {}).get(profile)
+    # task-category bots are deliberately stateless -- ignoring whatever
+    # session id is on record and always starting fresh is the whole
+    # point (a task bot has no business remembering a previous unrelated
+    # ask). _ensure_bot_chat_session's own "no active session id -> create
+    # a new one" path (unchanged) does the rest; the old session is never
+    # deleted, same convention as a rollover -- it just never gets read
+    # back into context again.
+    active_id = None if _is_task_category(state, profile) else (state.get("active_sessions") or {}).get(profile)
     reply, session_id = await _engine.send_to_bot(profile, message, API_SERVER_KEY, active_id)
     if session_id != active_id:
         await _mutate_state(lambda d: d.setdefault("active_sessions", {}).__setitem__(profile, session_id))
@@ -520,7 +539,9 @@ async def stream_to_bot(profile: str, message: str):
     if _engine._use_http():
         await bot_processes.ensure_bot_process_running(profile)
     state = _read_state()
-    active_id = (state.get("active_sessions") or {}).get(profile)
+    # See send_to_bot's own comment on _is_task_category -- same
+    # deliberate statelessness, applied to the streaming path.
+    active_id = None if _is_task_category(state, profile) else (state.get("active_sessions") or {}).get(profile)
     session_state, chunks = await _engine.stream_to_bot(profile, message, API_SERVER_KEY, active_id)
     async for chunk in chunks:
         yield chunk
@@ -570,6 +591,20 @@ def _validate_name(name: str) -> str:
     return name
 
 
+# Bot lifecycle categories -- see _infer_bot_category()'s own docstring for
+# what drives each one and _keep_warm_bots() for how they affect worker
+# lifecycle. "general" is the implicit default for any bot with no entry in
+# state["categories"] (every bot that existed before this feature).
+CATEGORIES = ("chore", "task", "developer", "supervisor", "general")
+
+
+def _validate_category(category: str) -> str:
+    category = (category or "").strip().lower()
+    if category not in CATEGORIES:
+        raise HTTPException(status_code=400, detail=f"category must be one of: {', '.join(CATEGORIES)}")
+    return category
+
+
 class RosterEntry(BaseModel):
     name: str
     title: str
@@ -582,6 +617,7 @@ class RosterEntry(BaseModel):
     preview: str = ""
     last_active: Optional[float] = None
     avatar: dict[str, Any] = {}
+    category: str = "general"
 
 
 @app.get("/roster")
@@ -593,6 +629,7 @@ async def get_roster(include_hidden: bool = False) -> list[RosterEntry]:
     avatars = state.get("avatars") or {}
     titles = state.get("titles") or {}
     locked_models = state.get("locked_models") or {}
+    categories = state.get("categories") or {}
 
     visible = [p for p in profiles if p.get("name") and (include_hidden or p["name"] not in hidden)]
     activity = await asyncio.gather(*(get_bot_activity(p["name"]) for p in visible))
@@ -618,6 +655,7 @@ async def get_roster(include_hidden: bool = False) -> list[RosterEntry]:
                 preview=latest.get("preview") or "",
                 last_active=latest.get("last_active"),
                 avatar=avatars.get(name) or {"type": "blob"},
+                category=categories.get(name) or "general",
             )
         )
     entries.sort(key=lambda e: e.last_active or 0, reverse=True)
@@ -637,6 +675,9 @@ class BotCreate(BaseModel):
     model: Optional[str] = None
     soul: Optional[str] = None
     no_skills: bool = False
+    # Omitted -> inferred from description (_infer_bot_category); an
+    # explicit value here always wins over inference, no LLM call made.
+    category: Optional[str] = None
 
 
 async def _bot_current_provider_model(name: str) -> tuple[Optional[str], Optional[str]]:
@@ -691,6 +732,84 @@ async def _default_model() -> tuple[Optional[str], Optional[str]]:
     return None, None
 
 
+_CATEGORY_DESCRIPTIONS = {
+    "chore": "recurring, scheduled/periodic work -- reminders, daily check-ins, anything meant to fire on a timer",
+    "task": "small, one-off requests with no need to remember earlier unrelated asks -- quick lookups, one-shot conversions",
+    "developer": "long-running autonomous work -- coding, multi-step builds, anything that may run unattended for a long time and needs to keep full context throughout",
+    "supervisor": "reviews/evaluates other bots' recent work and reports on it -- a QC/oversight role, not a task-doer itself",
+    "general": "a normal conversational assistant that doesn't clearly fit the above",
+}
+
+_CATEGORY_PROMPT_TEMPLATE = (
+    "Classify a bot by its description into EXACTLY ONE of these categories:\n"
+    + "\n".join(f"- {name}: {desc}" for name, desc in _CATEGORY_DESCRIPTIONS.items())
+    + "\n\nBot description: {description}\n\n"
+    "Reply with ONLY the single category word (chore, task, developer, supervisor, or general) -- no punctuation, no explanation."
+)
+
+
+async def _infer_bot_category(description: str) -> str:
+    """Classify a new bot's lifecycle category from its own description --
+    the user's own explicit instruction: "it should be inferred [from the
+    description]... and the user can manually change its type as well
+    later if required." See CATEGORIES/_keep_warm_bots for what each
+    value actually changes about the bot's lifecycle.
+
+    Runs the classification as a real chat turn on a TEMPORARY session on
+    "default" (create, one turn, delete) rather than default's own
+    visible "[Bots UI] default" thread -- _bot_session_rollover_n's own
+    title-family matching means a differently-titled session is never
+    picked up by the merged-history view, so this never pollutes
+    default's real chat with a classification exchange the user never
+    asked to see.
+
+    Best-effort throughout: an empty description skips the LLM call
+    entirely (nothing to classify); a reply that isn't exactly one of the
+    five known category words (a hedge, an explanation despite the
+    instruction not to, or any failure -- unreachable worker, timeout,
+    the temp session itself failing to create) falls back to "general"
+    rather than failing bot creation over a classification miss. Cleanup
+    (deleting the temp session) is ALSO best-effort -- a failed delete
+    just leaves one harmless orphaned session, never worth failing
+    creation over.
+    """
+    description = (description or "").strip()
+    if not description:
+        return "general"
+    headers = _engine._api_headers(API_SERVER_KEY)
+    session_id = None
+    try:
+        await bot_processes.ensure_bot_process_running("default")
+        session_id = await _engine._create_bot_session("default", "[zBots category inference]", headers)
+        prompt = _CATEGORY_PROMPT_TEMPLATE.format(description=description)
+        with _engine._profile_scope("default"):
+            status, body = await _engine._call_handler(
+                "_handle_session_chat",
+                profile="default",
+                method="POST",
+                path=f"/api/sessions/{session_id}/chat",
+                json_body={"message": prompt},
+                headers=headers,
+                match_info={"session_id": session_id},
+            )
+        if status >= 400:
+            return "general"
+        msg = (body or {}).get("message")
+        reply = str(msg.get("content") or "") if isinstance(msg, dict) else ""
+        category = reply.strip().lower().strip(".!\"'")
+        return category if category in CATEGORIES else "general"
+    except Exception:
+        return "general"
+    finally:
+        if session_id:
+            try:
+                base = _bot_base("default")
+                async with httpx.AsyncClient(timeout=15) as client:
+                    await client.delete(f"{base}/api/sessions/{session_id}", headers=_api_headers())
+            except Exception:
+                pass
+
+
 @app.post("/bots")
 async def create_bot(body: BotCreate) -> RosterEntry:
     name = _validate_name(body.name)
@@ -715,6 +834,8 @@ async def create_bot(body: BotCreate) -> RosterEntry:
     await _sync_profile_provider(name, provider)
     if body.title:
         await _mutate_state(lambda d: d["titles"].__setitem__(name, body.title))
+    category = _validate_category(body.category) if body.category else await _infer_bot_category(body.description)
+    await _mutate_state(lambda d: d["categories"].__setitem__(name, category))
     if body.soul:
         await dash_send("PUT", f"/api/profiles/{name}/soul", {"content": body.soul})
     _engine.invalidate_adapter()
@@ -765,6 +886,11 @@ class BotUpdate(BaseModel):
     provider: Optional[str] = None
     model: Optional[str] = None
     soul: Optional[str] = None
+    # Manual override -- the user's own explicit instruction: inferred at
+    # creation, but "the user can manually change its type as well later
+    # if required." No re-inference call here; this is a direct
+    # statement, not a request to reclassify.
+    category: Optional[str] = None
 
 
 @app.patch("/bots/{name}")
@@ -778,6 +904,9 @@ async def update_bot(name: str, body: BotUpdate) -> dict:
             await dash_send("PATCH", f"/api/profiles/{name}", {"new_name": body.title})
         else:
             await _mutate_state(lambda d: d["titles"].__setitem__(name, body.title))
+    if body.category is not None:
+        category = _validate_category(body.category)
+        await _mutate_state(lambda d: d["categories"].__setitem__(name, category))
     if body.description is not None:
         await dash_send("PUT", f"/api/profiles/{name}/description", {"description": body.description})
     if body.provider and body.model:
@@ -958,6 +1087,24 @@ class SendMessage(BaseModel):
 async def bot_messages(name: str) -> list[dict]:
     name = _validate_name(name)
     return await get_bot_messages(name)
+
+
+@app.post("/bots/{name}/wake")
+async def bot_wake(name: str) -> dict:
+    """Opportunistic pre-warm -- fired by the frontend the moment a bot's
+    chat is opened (see selectBot() in app.js), in parallel with loading
+    its message history, so the worker is already spinning up while the
+    user is still reading/typing instead of only starting on first send.
+    Purely latency-hiding: a real chat message still calls
+    ensure_bot_process_running() itself on its own path, so a failure or
+    race here is never something the user needs to see or retry.
+    """
+    name = _validate_name(name)
+    try:
+        await bot_processes.ensure_bot_process_running(name)
+    except Exception:
+        pass
+    return {"ok": True}
 
 
 @app.post("/bots/{name}/messages")
@@ -1878,13 +2025,31 @@ IDLE_REAP_SECONDS = float(os.environ.get("BOT_IDLE_REAP_SECONDS", str(30 * 60)))
 IDLE_REAP_INTERVAL_SECONDS = float(os.environ.get("BOT_IDLE_REAP_INTERVAL_SECONDS", "300"))
 
 
+# Categories that stay keep-warm unconditionally, regardless of whether
+# they happen to have a routine: chore (its own scheduler-adjacent
+# delivery reliability -- same reasoning that already made
+# routine-presence a keep-warm signal, now explicit instead of inferred),
+# developer (long-running autonomous work, needs to survive well past any
+# idle-reap sweep), supervisor (runs its own periodic QC routine and
+# needs to be responsive to check in on other bots on demand too).
+_KEEP_WARM_CATEGORIES = frozenset({"chore", "developer", "supervisor"})
+
+
 async def _keep_warm_bots(profile_names: list[str]) -> set[str]:
-    """Every profile with at least one ENABLED routine, plus "default"
-    unconditionally. One /api/cron/jobs?profile=all fetch, not one call
-    per bot -- list_routines()'s own per-bot endpoint exists for the UI,
-    not for a loop over the whole roster.
+    """"default" unconditionally, every bot whose own category is
+    chore/developer/supervisor (see _KEEP_WARM_CATEGORIES), plus (kept,
+    not replaced -- a "general"-category bot that happens to have an
+    enabled routine should still stay warm for it) every profile with at
+    least one ENABLED routine. One /api/cron/jobs?profile=all fetch, not
+    one call per bot -- list_routines()'s own per-bot endpoint exists for
+    the UI, not for a loop over the whole roster.
     """
+    state = _read_state()
+    categories = state.get("categories") or {}
     keep_warm = {"default"} & set(profile_names)
+    for name in profile_names:
+        if categories.get(name, "general") in _KEEP_WARM_CATEGORIES:
+            keep_warm.add(name)
     try:
         jobs = await dash_get("/api/cron/jobs", profile="all")
     except Exception:

@@ -428,6 +428,7 @@ function openEditModal(entry) {
   document.getElementById("bot-name").disabled = true;
   document.getElementById("bot-title").value = entry.title;
   document.getElementById("bot-description").value = entry.description;
+  document.getElementById("bot-category").value = entry.category || "general";
   loadModelCatalog().then(() => {
     document.getElementById("bot-provider").value = entry.provider || "";
     document.getElementById("bot-provider").onchange();
@@ -455,6 +456,10 @@ document.getElementById("bot-form").addEventListener("submit", async (e) => {
   const soul = document.getElementById("bot-soul").value;
   const cloneFrom = document.getElementById("bot-clone-from").value;
   const noSkills = document.getElementById("bot-no-skills").checked;
+  // Empty ("Auto-detect from description") is omitted on create, which
+  // triggers _infer_bot_category server-side; on edit it's a no-op (no
+  // re-inference), so only send it there when the user actually picked one.
+  const category = document.getElementById("bot-category").value;
 
   try {
     if (editingBot) {
@@ -467,6 +472,7 @@ document.getElementById("bot-form").addEventListener("submit", async (e) => {
         // so unlike create, an empty value here is a deliberate clear, not
         // "user didn't set one" -- must still be sent, not dropped.
         soul,
+        category: category || undefined,
       });
       toast(`${title || editingBot.name} updated`);
     } else {
@@ -479,6 +485,7 @@ document.getElementById("bot-form").addEventListener("submit", async (e) => {
         model: model || undefined,
         soul: soul || undefined,
         no_skills: noSkills,
+        category: category || undefined,
       });
       toast(`${title || name} created`);
     }
@@ -706,6 +713,11 @@ async function selectBot(name) {
   if (entry) renderChatHeader(entry);
   showChatView();
   renderRoster();
+  // Fire-and-forget pre-warm: the worker starts spinning up while the
+  // user is still reading history/typing, instead of only on first send.
+  // Never awaited/never blocks the chat from opening -- a failure here
+  // is invisible; the real send still ensures the worker itself.
+  apiSend("POST", "/bots/" + name + "/wake").catch(() => {});
   await loadMessages();
   updateComposerState();
   if (sendingKeys.has(chatKey(selected))) showTypingIndicator();

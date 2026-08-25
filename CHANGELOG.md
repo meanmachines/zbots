@@ -76,6 +76,59 @@ tagged on `main`.
     - Covered by new tests in `test_push.py` (`_send_one` gets a real
       `Vapid` instance, not a string; `_send_one` calls `pywebpush.webpush`
       with a positive `ttl`).
+- Bot lifecycle categories: `chore | task | developer | supervisor |
+  general` (requested live -- "classify bots into the ones that does daily
+  chores or ones which does small tasks... one that needs to do multi turn
+  in auto mode for days... and then supervisor or quality control bots that
+  can keep eye on other bots' work"). Every bot lands in exactly one
+  category, stored in zBots' own `state.json` (not hermes-agent's native
+  profile config -- this is zBots' own bookkeeping, same convention as
+  `titles`/`locked_models`), with `general` as the implicit default for
+  every bot that existed before this.
+  - `_infer_bot_category()`: classifies a new bot from its own description
+    via one real chat turn on a temporary, throwaway session on `default`
+    (never `default`'s own visible chat thread) -- an LLM classification
+    call, not string matching. Falls back to `general` on an empty
+    description, an unparseable reply, or any failure; the temporary
+    session is deleted afterward, best-effort. An explicit `category` on
+    `POST /bots` skips inference entirely. `PATCH /bots/{name}` accepts a
+    manual override at any time, per the user's own instruction ("the user
+    can manually change its type as well later if required") -- no
+    re-inference call, a direct statement is taken as-is.
+  - `_keep_warm_bots()` is now category-aware: `chore`, `developer`, and
+    `supervisor` bots stay warm unconditionally (recurring/long-running/
+    always-watching work all need to be instantly reachable), same as
+    `default` and any bot with an enabled routine (kept as an additional
+    signal, not replaced). `task` and `general` bots stay on-demand,
+    30-minute idle-reaped as before.
+  - `task` bots get a fresh session on every call
+    (`send_to_bot`/`stream_to_bot` pass no stored session id for them) --
+    a one-off request has no business remembering a previous unrelated ask.
+    The old session is never deleted, same convention as a rollover --
+    history stays real and readable, a `task` bot just never reads its own
+    past history back into context.
+  - New `POST /bots/{name}/wake`: opportunistic pre-warm, best-effort
+    (never a visible failure) -- fired by the frontend the moment a bot's
+    chat is opened (`selectBot()`), in parallel with loading its message
+    history, so the worker is already starting while the user is still
+    reading/typing instead of only on first send.
+  - Frontend: category select in the create/edit bot modal (Advanced
+    section) -- "Auto-detect from description" (default, triggers
+    inference) plus the four named categories plus General. No new roster
+    indicator -- the roster row already carries an avatar, title, time,
+    preview, and an active/offline dot; a category dot would be exactly
+    the kind of badge-creep the UI has deliberately stayed away from.
+  - Supervisor/QC bots are a configuration pattern, not new mechanism: a
+    `supervisor`-category bot paired with a routine whose prompt calls the
+    existing `supervisor_mcp.py` tools (`list_bots`, `get_bot_status`,
+    `message_bot`) across the roster and reports findings -- delivered
+    through the same routine-delivery path every other routine already
+    uses, so it gets a real push notification automatically. Documented in
+    `docs/supervisor-bots.md` (persona + sample routine), not built as a
+    separate capability.
+  - Covered by new tests in `test_backend.py` (category
+    inference/validation/parsing/fallback, category-aware keep-warm,
+    `task`-bot fresh-session behavior, the `/wake` endpoint).
 
 ### Fixed
 - Real bug found live: a resilience-triggered rollover (see the

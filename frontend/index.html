@@ -126,6 +126,17 @@
             </div>
           </div>
           <div class="field">
+            <label for="bot-category">Category</label>
+            <select id="bot-category">
+              <option value="">Auto-detect from description</option>
+              <option value="chore">Chore (recurring, scheduled)</option>
+              <option value="task">Task (one-off, no memory between calls)</option>
+              <option value="developer">Developer (long-running, keeps full context)</option>
+              <option value="supervisor">Supervisor (reviews other bots)</option>
+              <option value="general">General</option>
+            </select>
+          </div>
+          <div class="field">
             <label for="bot-soul">SOUL.md (persona &amp; instructions)</label>
             <textarea id="bot-soul" placeholder="Leave blank to use the default persona"></textarea>
           </div>
