@@ -149,6 +149,24 @@ tagged on `main`.
     `task`-bot fresh-session behavior, the `/wake` endpoint).
 
 ### Fixed
+- Branding leaks in zBots' own frontend chrome (labels, error banners, a
+  confirm dialog) and one backend API error message, found via a full
+  audit of every "hermes" mention in zBots' own (non-vendored) code --
+  bot chat replies were already covered (`persona.py`'s system-prompt
+  instruction plus a deterministic `redact_branding_leaks` regex scrub),
+  but the UI zBots itself built around that had never gotten the same
+  pass: the Connectors page said "the same channels the Hermes desktop
+  app supports", the MCP catalog modal said "the same catalog the Hermes
+  desktop app's... uses", the System page's restart confirm dialog read
+  "Restart the Hermes gateway?", the Connectors page's offline-gateway
+  banner fell back to telling an admin to run `hermes gateway run` (a raw
+  CLI command a zBots admin has no way to actually invoke), and a real
+  dashboard-auth failure path returned `Could not authenticate to the
+  Hermes dashboard: HTTP {status}` as its error detail. All five
+  rewritten to carry no hermes-agent branding; internal code comments and
+  the required upstream attribution in `README.md`/
+  `THIRD_PARTY_LICENSES.md`/`docs/CREDITS.md` were left alone (accurate
+  technical documentation and license compliance, not user-facing leaks).
 - Real bug found live: a resilience-triggered rollover (see the
   `gateway.multiplex_profiles`/provider-scoping fixes above for the two
   other real bugs this session's rollover logic already recovers from)

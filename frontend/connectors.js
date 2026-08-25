@@ -36,7 +36,7 @@ async function loadConnectors() {
       notice.className = "empty-state";
       notice.textContent =
         "The messaging gateway isn't running, so connectors can be configured here but won't actually connect yet. Ask an admin to start it (" +
-        (res.gateway_start_command || "hermes gateway run") + ").";
+        (res.gateway_start_command || "restart it from the System page") + ").";
     }
     list.innerHTML = "";
     if (!platforms.length) {

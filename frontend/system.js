@@ -38,7 +38,7 @@ async function loadSystem() {
 }
 
 document.getElementById("restart-gateway-btn").addEventListener("click", async () => {
-  if (!confirm("Restart the Hermes gateway? Active sessions will be interrupted.")) return;
+  if (!confirm("Restart the gateway? Active sessions will be interrupted.")) return;
   try {
     await apiSend("POST", "/system/restart-gateway");
     toast("Restart requested");

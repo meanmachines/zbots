@@ -200,7 +200,7 @@ async def _dashboard_login() -> None:
         json={"provider": "basic", "username": DASHBOARD_USER, "password": DASHBOARD_PASS},
     )
     if r.status_code >= 400:
-        raise HTTPException(status_code=502, detail=f"Could not authenticate to the Hermes dashboard: HTTP {r.status_code}")
+        raise HTTPException(status_code=502, detail=f"Could not authenticate to the backend: HTTP {r.status_code}")
     _dash_logged_in = True
 
 
