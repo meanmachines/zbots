@@ -94,6 +94,27 @@ tagged on `main`.
     `_provision_profile_api_server_key()`. No-ops cleanly for an
     unauthenticated provider (no `key_env` at all). Covered by new tests
     in `test_backend.py`.
+  - Full live verification pass on zbots-dev with both fixes applied and
+    every existing secondary profile backfilled (`providers:` block +
+    credential): blocking chat on `default` and three non-default bots
+    (`hydration-reminder`/`deepseek-flash`, `butler`/`deepseek-flash`,
+    `coder`/`sglang-thor` unauthenticated); streaming chat on a
+    non-default bot, including one real rollover observed live (attempt 1
+    silently produced no content, attempt 2 retried and streamed the real
+    answer -- confirmed nothing from attempt 1 reached the client,
+    matching `_chunks()`'s own suppression contract) and one clean
+    single-attempt completion; `GET /bots/{name}/messages` on a
+    non-default bot returned correctly with no special-casing needed,
+    resolving the plan's open question 2 (the embedded-path-only
+    secondary-profile-scoping workaround does not appear to be needed
+    under real `/p/<profile>/` routing, though `get_bot_messages`' own
+    workaround comment is left in place since it's specific to the
+    embedded transport and does nothing under `http`); session-lock via
+    `PATCH /bots/{name}` (`_lock_active_session_model`) on a non-default
+    bot; roster still renders every bot correctly afterward. zBots-dev is
+    intentionally left running `ZBOTS_CHAT_TRANSPORT=http` for a longer
+    soak/observation period before any further rollout decision -- `main`
+    is untouched and stays on the embedded transport throughout.
 
 ### Added
 - Coding tasks now get delegated to a dedicated "coder" bot instead of
