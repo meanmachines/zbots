@@ -59,6 +59,15 @@ function setCachedPreview(path, fileInfo) {
   previewCache.set(path, fileInfo);
 }
 
+// Workspace panel -- path -> {content: string|null, ts: number}. content is
+// only ever pre-filled for write_file (the call's own arguments already
+// carry the full text -- see findWorkspaceFilesInHistory below); read_file's
+// content lives in the tool RESULT, not the call, so it's left null and
+// fetched on click via GET /bots/{name}/workspace/file, same bound the
+// backend enforces (see main.py's own _touched_paths_from_messages comment).
+// Reset on every selectBot() -- this is a per-chat view, not cross-bot state.
+let workspaceFiles = new Map();
+
 // Keyed by "kind:id" so a reply in flight for one bot/group doesn't lock
 // the composer for every other chat -- multi-bot is the whole point of
 // this app, you should be able to message bot B while bot A is thinking.
@@ -713,8 +722,11 @@ async function selectBot(name) {
   selected = { kind: "bot", id: name };
   lastRenderedCount = -1;
   lastMessagesSignature = null;
+  workspaceFiles = new Map();
+  showWorkspaceFilesList();
   document.body.classList.add("chat-open");
   document.getElementById("routines-pane").classList.remove("open");
+  document.getElementById("workspace-pane").classList.remove("open");
   const entry = roster.find((r) => r.name === name);
   if (entry) renderChatHeader(entry);
   showChatView();
@@ -1146,6 +1158,95 @@ function findPreviewPathsInHistory(rawRows) {
   return out;
 }
 
+// Workspace panel's own history scan -- mirrors backend/main.py's
+// _touched_paths_from_messages exactly (same tool_calls.function.arguments
+// source, same write_file/read_file allowlist) so the frontend's file list
+// and the backend's own bound for GET /bots/{name}/workspace/file can never
+// drift apart. Unlike findPreviewPathsInHistory above (media-type files
+// only, scanned from free-text args), this covers every file type a bot's
+// real coding tools touch -- .py, .md, .json, anything -- which is the
+// actual gap this panel exists to close (see this session's own findings:
+// the existing preview-card path never fires for a plain code file, and
+// only ever resolves within /opt/data regardless of file type).
+function findWorkspaceFilesInHistory(rawRows) {
+  const out = new Map();
+  for (const row of rawRows) {
+    if (row.role !== "assistant" || !Array.isArray(row.tool_calls)) continue;
+    const ts = messageTimestamp(row) || 0;
+    for (const call of row.tool_calls) {
+      const fn = (call && call.function) || {};
+      if (fn.name !== "write_file" && fn.name !== "read_file") continue;
+      let args;
+      try {
+        args = JSON.parse(fn.arguments || "{}");
+      } catch (_) {
+        continue;
+      }
+      if (!args.path) continue;
+      const existing = out.get(args.path);
+      out.set(args.path, {
+        content: fn.name === "write_file" ? args.content : (existing && existing.content) || null,
+        ts: existing ? existing.ts : ts,
+      });
+    }
+  }
+  return out;
+}
+
+function showWorkspaceFilesList() {
+  document.getElementById("workspace-files-list").style.display = "";
+  document.getElementById("workspace-file-viewer").style.display = "none";
+}
+
+// Rebuilt from scratch on every call, same convention as renderMessages --
+// the underlying workspaceFiles Map is small (one conversation's worth of
+// files, not a long scrollback) so a full rebuild is cheap and never risks
+// drifting from what workspaceFiles actually holds.
+function renderWorkspacePanel() {
+  const list = document.getElementById("workspace-files-list");
+  list.innerHTML = "";
+  const paths = Array.from(workspaceFiles.keys()).sort((a, b) => (workspaceFiles.get(a).ts || 0) - (workspaceFiles.get(b).ts || 0));
+  if (!paths.length) {
+    const empty = document.createElement("div");
+    empty.id = "workspace-files-empty";
+    empty.textContent = "No files touched yet.";
+    list.appendChild(empty);
+    return;
+  }
+  for (const path of paths) {
+    const row = document.createElement("div");
+    row.className = "workspace-file-row";
+    row.title = path;
+    const name = document.createElement("span");
+    name.className = "workspace-file-row-name";
+    name.textContent = path;
+    row.appendChild(name);
+    row.addEventListener("click", () => openWorkspaceFile(path));
+    list.appendChild(row);
+  }
+}
+
+async function openWorkspaceFile(path) {
+  const cached = workspaceFiles.get(path);
+  document.getElementById("workspace-files-list").style.display = "none";
+  const viewer = document.getElementById("workspace-file-viewer");
+  viewer.style.display = "flex";
+  document.getElementById("workspace-file-viewer-name").textContent = path;
+  const body = document.getElementById("workspace-file-viewer-body");
+  if (cached && cached.content != null) {
+    body.textContent = cached.content;
+    return;
+  }
+  body.textContent = "Loading…";
+  try {
+    const result = await apiGet(`/bots/${selected.id}/workspace/file?path=${encodeURIComponent(path)}`);
+    if (cached) cached.content = result.content; // fill the cache in place so re-opening is instant
+    body.textContent = result.content;
+  } catch (e) {
+    body.textContent = "Could not load this file.";
+  }
+}
+
 // data: URIs work fine as an <iframe>/<img> src, but real bug found live:
 // clicking "Open full size" (an <a target="_blank" href="data:...">) did
 // nothing at all, silently -- Chrome (and other modern browsers) refuse
@@ -1366,6 +1467,18 @@ async function streamBotReply(botName, text, isStillActive) {
         hideTypingIndicator();
         logThinkingStep(toolStatusLabel(payload.tool_name, payload.preview, payload.args));
         findPreviewPathsInArgs(payload.args, previewPathCandidates, 0);
+        if (
+          (payload.tool_name === "write_file" || payload.tool_name === "read_file") &&
+          payload.args &&
+          payload.args.path
+        ) {
+          const existing = workspaceFiles.get(payload.args.path);
+          workspaceFiles.set(payload.args.path, {
+            content: payload.tool_name === "write_file" ? payload.args.content : (existing && existing.content) || null,
+            ts: existing ? existing.ts : Date.now() / 1000,
+          });
+          if (document.getElementById("workspace-pane").classList.contains("open")) renderWorkspacePanel();
+        }
       } else if (eventName === "tool.progress" && payload.tool_name === "_thinking") {
         hideTypingIndicator();
         logThinkingStep("Thinking");
@@ -1475,6 +1588,8 @@ async function loadMessages(fromPoll = false) {
       // the very next line's filter (collapseToFinalTurns never sees them
       // either), so this has to happen before that filter runs.
       const previewPaths = findPreviewPathsInHistory(rows || []);
+      workspaceFiles = findWorkspaceFilesInHistory(rows || []);
+      if (document.getElementById("workspace-pane").classList.contains("open")) renderWorkspacePanel();
       const chatRows = collapseToFinalTurns((rows || []).filter((r) => r.role === "user" || r.role === "assistant"));
       renderMessages(chatRows, "bot", previewPaths);
     } else {
@@ -1588,6 +1703,16 @@ document.getElementById("routines-toggle-btn").addEventListener("click", async (
     await loadRoutines(selected.id);
   }
 });
+
+document.getElementById("workspace-toggle-btn").addEventListener("click", () => {
+  const pane = document.getElementById("workspace-pane");
+  pane.classList.toggle("open");
+  if (pane.classList.contains("open")) renderWorkspacePanel();
+});
+document.getElementById("workspace-close-btn").addEventListener("click", () => {
+  document.getElementById("workspace-pane").classList.remove("open");
+});
+document.getElementById("workspace-file-viewer-back").addEventListener("click", showWorkspaceFilesList);
 
 // Cross-bot nudges (one bot's routine delivering into ANOTHER bot's chat)
 // use Hermes' own real "bot-chat:<profile>" cron delivery lane -- see
@@ -2071,8 +2196,11 @@ function populateIcons() {
   document.getElementById("retry-btn").innerHTML = icon("retry", 16);
   document.getElementById("export-btn").innerHTML = icon("download", 16);
   document.getElementById("routines-toggle-btn").innerHTML = icon("clock", 16);
+  document.getElementById("workspace-toggle-btn").innerHTML = icon("files", 16);
   document.getElementById("chat-menu-btn").innerHTML = icon("more", 16);
   document.getElementById("routines-close-btn").innerHTML = icon("close", 15);
+  document.getElementById("workspace-close-btn").innerHTML = icon("close", 15);
+  document.getElementById("workspace-file-viewer-back").innerHTML = icon("back", 15);
   document.getElementById("preview-close-btn").innerHTML = icon("close", 15);
   document.getElementById("preview-header-download").innerHTML = icon("download", 15);
   document.getElementById("send-btn").innerHTML = icon("send", 15) + "<span>Send</span>";

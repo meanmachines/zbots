@@ -771,6 +771,68 @@ input:focus, textarea:focus, select:focus {
 #add-routine-form { padding: 0.75rem 1.1rem; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 0.5rem; }
 #add-routine-form input, #add-routine-form textarea, #add-routine-form select { width: 100%; }
 
+/* Workspace panel -- live file list + viewer for what a bot is actually
+   touching on disk, same "own real estate off to the side" pattern
+   #routines-pane already established (see that pane's own comment). */
+#workspace-pane {
+  width: 320px;
+  border-left: 1px solid var(--border);
+  display: none;
+  flex-direction: column;
+  overflow-y: auto;
+}
+#workspace-pane.open { display: flex; }
+#workspace-header {
+  padding: 0.9rem 1.1rem;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+#workspace-header h2 { font-size: 0.88rem; margin: 0; }
+#workspace-files-list { padding: 0.6rem; display: flex; flex-direction: column; gap: 0.3rem; overflow-y: auto; }
+#workspace-files-empty { padding: 0.6rem 0.5rem; font-size: 0.8rem; color: var(--text-muted); }
+.workspace-file-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.6rem;
+  border-radius: calc(var(--radius) * 0.5);
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-family: ui-monospace, monospace;
+  overflow: hidden;
+}
+.workspace-file-row:hover { background: var(--card); }
+.workspace-file-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#workspace-file-viewer { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+#workspace-file-viewer-header {
+  padding: 0.7rem 0.9rem;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+#workspace-file-viewer-name {
+  font-size: 0.78rem;
+  font-family: ui-monospace, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+#workspace-file-viewer-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  margin: 0;
+  padding: 0.9rem;
+  font-family: ui-monospace, monospace;
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* ---------- Modals ---------- */
 
 .modal-backdrop {
@@ -1068,7 +1130,8 @@ details.advanced summary { cursor: pointer; font-size: 0.82rem; color: var(--tex
   #chat-back-btn { display: inline-flex; }
 
   #routines-pane,
-  #preview-pane {
+  #preview-pane,
+  #workspace-pane {
     position: fixed;
     inset: 0;
     width: 100%;

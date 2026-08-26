@@ -1184,6 +1184,70 @@ async def bot_messages(name: str) -> list[dict]:
     return await get_bot_messages(name)
 
 
+# --------------------------------------------------------------------------
+# Workspace panel -- live file list + content viewer alongside the chat.
+# Real gap found live: the existing /files page (dash_get("/api/files") ->
+# hermes-agent's own web_server.py) is locked to /opt/data in this
+# container's real deployment -- the shared hermes data root, not any one
+# bot's actual working directory. A bot's own write_file/read_file/terminal
+# tools can and do touch paths well outside that (confirmed live: a real
+# build landed everything under /root/kvstore/), so the existing page can't
+# show what a bot actually built. This is a separate, per-bot-scoped
+# surface, not a reuse of that one.
+# --------------------------------------------------------------------------
+
+_FILE_TOOL_NAMES = {"write_file", "read_file"}
+
+
+def _touched_paths_from_messages(messages: list[dict]) -> set[str]:
+    """Every absolute path this bot's own write_file/read_file tool calls
+    have actually named, scanned from persisted tool_calls arguments (not
+    the tool's own result shape, which varies per tool -- write_file's
+    result happens to carry resolved_path, but read_file's doesn't carry a
+    path at all, so the call's own arguments are the one reliable source
+    for both). This is the same data get_bot_messages already returns; nothing
+    new is persisted for this.
+    """
+    paths: set[str] = set()
+    for msg in messages:
+        for call in msg.get("tool_calls") or []:
+            fn = (call or {}).get("function") or {}
+            if fn.get("name") not in _FILE_TOOL_NAMES:
+                continue
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except (TypeError, ValueError):
+                continue
+            path = args.get("path")
+            if path:
+                paths.add(path)
+    return paths
+
+
+@app.get("/bots/{name}/workspace/file")
+async def get_workspace_file(name: str, path: str) -> dict:
+    """Read a file's current content off local disk, for the workspace
+    panel's viewer -- covers a read_file the model did (no content ever
+    streamed to the client for those) or a file that's changed since it was
+    last written. Deliberately NOT a general file-read endpoint: reachable
+    only for a path this exact bot's own tool calls have actually named (see
+    _touched_paths_from_messages), same bound the frontend's own live/
+    backfilled file list is built from -- reading off local disk directly is
+    safe only because bot workers share this same container (see
+    bot_processes.py's own module docstring), not because the path is
+    otherwise trusted.
+    """
+    name = _validate_name(name)
+    messages = await get_bot_messages(name)
+    if path not in _touched_paths_from_messages(messages):
+        raise HTTPException(status_code=404, detail="Not a path this bot's own tools have touched.")
+    try:
+        content = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise HTTPException(status_code=404, detail=f"Could not read file: {exc}")
+    return {"path": path, "content": content}
+
+
 @app.post("/bots/{name}/wake")
 async def bot_wake(name: str) -> dict:
     """Opportunistic pre-warm -- fired by the frontend the moment a bot's

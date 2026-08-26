@@ -7,6 +7,48 @@ tagged on `main`.
 ## [Unreleased]
 
 ### Added
+- Workspace panel: a live file list + content viewer alongside the chat,
+  showing every file a bot's own `write_file`/`read_file` tool calls have
+  actually touched. Real gap found live: the existing `/files` page is a
+  separate top-level nav item, not integrated with any bot's chat, and its
+  backend (hermes-agent's own `web_server.py`) is locked to `/opt/data` in
+  the real container deployment -- a real build task landed everything
+  under `/root/kvstore/`, entirely outside what that page can see. The
+  existing inline preview-card mechanism (media files only -- html/png/
+  jpg/svg/etc, scanned by regex from tool args) has the same `/opt/data`
+  ceiling via the same backend and doesn't cover plain code files at all
+  (`.py`/`.md`/`.json` aren't in its extension list), so this is a
+  genuinely new, complementary surface, not a duplicate of either.
+  - New `GET /bots/{name}/workspace/file?path=<abs path>` in `main.py`:
+    reads a file directly off local disk (safe only because a bot's worker
+    shares zBots' own container -- see `bot_processes.py`'s own module
+    docstring -- not because the path is otherwise trusted) but only for a
+    path this exact bot's own tool calls have actually named. Deliberately
+    NOT a general file-read endpoint: `_touched_paths_from_messages` scans
+    the bot's own persisted `tool_calls` arguments (the one reliable source
+    of "what path did this call touch" across both `write_file` and
+    `read_file` -- their *result* shapes differ per tool, but the call
+    arguments always carry `path`) and the request 404s for anything not in
+    that set.
+  - Frontend (`app.js`): the SAME SSE stream already rendering the chat is
+    tapped live for `write_file`/`read_file` `tool.started` frames (no
+    second connection) to build a live per-bot file list as a bot works,
+    with `write_file`'s full content already in the frame so a
+    just-written file renders instantly with zero extra request. Backfilled
+    from `GET /bots/{name}/messages`'s own persisted `tool_calls` on
+    reload/reselect (`findWorkspaceFilesInHistory`, a JS mirror of the
+    backend's own `_touched_paths_from_messages` -- same source, same
+    bound, can't drift apart) so a page reload doesn't lose it. New
+    "Workspace" panel (`#workspace-pane`, toggled from the chat header,
+    same open/close convention `#routines-pane` already established) with a
+    file list and a read-only content viewer.
+  - Live preview of a bot's own running dev server (an iframe pointed at
+    whatever port a bot's `terminal`/`process` tool has bound) is scoped as
+    a follow-up -- the vendored `process`/`terminal` tools have no concept
+    of ports at all (confirmed live: no port field anywhere in
+    `process_registry.py`/`terminal_tool.py`), so that needs its own new
+    mechanism (process-tree/listening-socket introspection), not something
+    this pass's file-list work could piggyback on.
 - Multi-hour autonomous "developer" bot sessions with live steering,
   matching (and improving on) a real 21.5-hour hermes-agent desktop `coder`
   session read directly off the user's own machine (`state.db`, found via

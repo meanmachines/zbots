@@ -51,12 +51,27 @@
           <div id="chat-header-actions">
             <button id="retry-btn" class="icon-btn" title="Retry last message"></button>
             <button id="export-btn" class="icon-btn" title="Export conversation"></button>
+            <button id="workspace-toggle-btn" class="icon-btn" title="Workspace"></button>
             <button id="routines-toggle-btn" class="icon-btn" title="Routines"></button>
             <button id="chat-menu-btn" class="icon-btn" title="Manage bot"></button>
           </div>
         </div>
         <div id="chat-body">
           <div id="messages-pane"></div>
+          <aside id="workspace-pane">
+            <div id="workspace-header">
+              <h2>Workspace</h2>
+              <button id="workspace-close-btn" class="icon-btn" title="Close"></button>
+            </div>
+            <div id="workspace-files-list"></div>
+            <div id="workspace-file-viewer" style="display:none;">
+              <div id="workspace-file-viewer-header">
+                <span id="workspace-file-viewer-name"></span>
+                <button id="workspace-file-viewer-back" class="icon-btn" title="Back to files"></button>
+              </div>
+              <pre id="workspace-file-viewer-body"></pre>
+            </div>
+          </aside>
           <aside id="routines-pane">
             <div id="routines-header">
               <h2>Routines</h2>

@@ -1143,6 +1143,75 @@ def test_bot_messages_surfaces_a_worker_that_never_becomes_ready(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Workspace panel -- _touched_paths_from_messages / GET /bots/{name}/workspace/file.
+# Real gap found live: the existing /files page is locked to /opt/data, but a
+# bot's own tools can (and did, live) write well outside that (/root/kvstore/).
+# This is a differently-scoped, per-bot surface -- see main.py's own comment
+# on _touched_paths_from_messages for why arguments (not each tool's own
+# differently-shaped result) is the one reliable source of "what path did
+# this call touch" across both write_file and read_file.
+# ---------------------------------------------------------------------------
+
+def _tool_call_message(name, arguments):
+    return {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{"function": {"name": name, "arguments": json.dumps(arguments)}}],
+    }
+
+
+def test_touched_paths_from_messages_extracts_write_and_read_file_paths():
+    messages = [
+        _tool_call_message("write_file", {"path": "/root/kvstore/server.py", "content": "x"}),
+        _tool_call_message("read_file", {"path": "/root/kvstore/README.md"}),
+    ]
+    assert m._touched_paths_from_messages(messages) == {"/root/kvstore/server.py", "/root/kvstore/README.md"}
+
+
+def test_touched_paths_from_messages_ignores_non_file_tool_calls():
+    messages = [_tool_call_message("terminal", {"command": "ls /root/kvstore"})]
+    assert m._touched_paths_from_messages(messages) == set()
+
+
+def test_touched_paths_from_messages_ignores_messages_with_no_tool_calls():
+    assert m._touched_paths_from_messages([{"role": "user", "content": "hi"}]) == set()
+
+
+def test_touched_paths_from_messages_survives_malformed_arguments_json():
+    messages = [{"role": "assistant", "tool_calls": [{"function": {"name": "write_file", "arguments": "{not json"}}]}]
+    assert m._touched_paths_from_messages(messages) == set()  # must not raise
+
+
+def test_get_workspace_file_serves_a_path_the_bot_has_touched(client, monkeypatch, tmp_path):
+    real_file = tmp_path / "server.py"
+    real_file.write_text("print('hi')", encoding="utf-8")
+    messages = [_tool_call_message("write_file", {"path": str(real_file), "content": "print('hi')"})]
+    monkeypatch.setattr(m, "get_bot_messages", AsyncMock(return_value=messages))
+
+    resp = client.get("/bots/coder/workspace/file", params={"path": str(real_file)})
+    assert resp.status_code == 200
+    assert resp.json() == {"path": str(real_file), "content": "print('hi')"}
+
+
+def test_get_workspace_file_rejects_a_path_the_bot_never_touched(client, monkeypatch, tmp_path):
+    untouched = tmp_path / "secret.env"
+    untouched.write_text("SECRET=1", encoding="utf-8")
+    monkeypatch.setattr(m, "get_bot_messages", AsyncMock(return_value=[]))
+
+    resp = client.get("/bots/coder/workspace/file", params={"path": str(untouched)})
+    assert resp.status_code == 404
+
+
+def test_get_workspace_file_404s_on_a_touched_path_that_no_longer_exists(client, monkeypatch, tmp_path):
+    gone = tmp_path / "deleted.py"
+    messages = [_tool_call_message("write_file", {"path": str(gone), "content": "x"})]
+    monkeypatch.setattr(m, "get_bot_messages", AsyncMock(return_value=messages))
+
+    resp = client.get("/bots/coder/workspace/file", params={"path": str(gone)})
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # Push notifications -- SendMessage.notify wiring (bot_send) and the
 # /push/* endpoints. See push.py's own module docstring for why this
 # exists and why it's real Web Push, not a same-tab Notification() call.
