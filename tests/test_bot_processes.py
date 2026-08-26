@@ -204,6 +204,73 @@ def test_ensure_bot_process_running_raises_on_a_health_timeout(monkeypatch):
         asyncio.run(bot_processes.ensure_bot_process_running("coder"))
 
 
+def test_ensure_bot_process_running_self_heals_a_pid_reuse_false_positive(monkeypatch):
+    _fake_spawn_ctx(monkeypatch)
+    monkeypatch.setattr(bot_processes, "READY_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(bot_processes, "READY_POLL_INTERVAL_S", 0.01)
+
+    # Real collision found live: the registry's recorded pid for "coder"
+    # is a real, currently-alive process (this test process itself) that
+    # just isn't actually coder's worker -- exactly what happens when a
+    # dead worker's pid gets recycled by an unrelated later process in a
+    # container with a small pid space. _is_worker_alive trusts it and
+    # skips spawning, so the only thing that can catch this is the real
+    # GET /health check below still failing against the port nothing is
+    # actually listening on.
+    bot_processes.REGISTRY_PATH.write_text(
+        json.dumps(
+            {
+                "ports": {"coder": 8700},
+                "workers": {"coder": {"pid": os.getpid(), "port": 8700, "started_at": 0}},
+            }
+        )
+    )
+
+    healed = {"done": False}
+    real_forget = bot_processes._forget_worker
+
+    def _tracking_forget(profile):
+        real_forget(profile)
+        healed["done"] = True
+
+    monkeypatch.setattr(bot_processes, "_forget_worker", _tracking_forget)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if not healed["done"]:
+            raise httpx.ConnectError("nothing listening on the stale pid's claimed port", request=request)
+        return httpx.Response(200, json={"status": "ok"})
+
+    _use_health_transport(monkeypatch, handler)
+
+    port = asyncio.run(bot_processes.ensure_bot_process_running("coder"))
+    assert port == 8700
+    assert healed["done"] is True
+    assert bot_processes.is_running("coder") is True
+
+
+def test_ensure_bot_process_running_raises_once_self_heal_also_fails(monkeypatch):
+    _fake_spawn_ctx(monkeypatch)
+    monkeypatch.setattr(bot_processes, "READY_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(bot_processes, "READY_POLL_INTERVAL_S", 0.01)
+
+    bot_processes.REGISTRY_PATH.write_text(
+        json.dumps(
+            {
+                "ports": {"coder": 8700},
+                "workers": {"coder": {"pid": os.getpid(), "port": 8700, "started_at": 0}},
+            }
+        )
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("still nothing listening", request=request)
+
+    _use_health_transport(monkeypatch, handler)
+
+    with pytest.raises(RuntimeError, match="did not become ready"):
+        asyncio.run(bot_processes.ensure_bot_process_running("coder"))
+
+
 def test_ensure_bot_process_running_respawns_a_worker_that_died(monkeypatch):
     _fake_spawn_ctx(monkeypatch)
 

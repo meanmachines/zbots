@@ -1097,6 +1097,52 @@ def test_startup_handler_uses_the_retrying_roster_fetch(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# GET /bots/{name}/messages -- ensure_bot_process_running wiring. Real bug
+# found live: this read path had no such call at all, unlike send/stream,
+# and silently depended on bot_wake's own fire-and-forget pre-warm (which
+# swallows its own errors) having already run -- a worker that died since
+# its last chat (idle-reaped, crashed, or never started) 500'd with a raw
+# connection error instead of transparently respawning, same as every
+# other bot-facing route already does.
+# ---------------------------------------------------------------------------
+
+def test_bot_messages_ensures_the_worker_is_running_under_http(client, monkeypatch):
+    monkeypatch.setattr(m._engine, "_use_http", lambda: True)
+    wake_calls = []
+    monkeypatch.setattr(
+        m.bot_processes, "ensure_bot_process_running", AsyncMock(side_effect=lambda p: wake_calls.append(p))
+    )
+    monkeypatch.setattr(m._engine, "get_bot_messages", AsyncMock(return_value=[]))
+
+    resp = client.get("/bots/coder/messages")
+    assert resp.status_code == 200
+    assert wake_calls == ["coder"]
+
+
+def test_bot_messages_skips_ensure_under_embedded_transport(client, monkeypatch):
+    monkeypatch.setattr(m._engine, "_use_http", lambda: False)
+    wake_calls = []
+    monkeypatch.setattr(
+        m.bot_processes, "ensure_bot_process_running", AsyncMock(side_effect=lambda p: wake_calls.append(p))
+    )
+    monkeypatch.setattr(m._engine, "get_bot_messages", AsyncMock(return_value=[]))
+
+    resp = client.get("/bots/coder/messages")
+    assert resp.status_code == 200
+    assert wake_calls == []
+
+
+def test_bot_messages_surfaces_a_worker_that_never_becomes_ready(monkeypatch):
+    monkeypatch.setattr(m._engine, "_use_http", lambda: True)
+    monkeypatch.setattr(
+        m.bot_processes, "ensure_bot_process_running", AsyncMock(side_effect=RuntimeError("did not become ready"))
+    )
+
+    with pytest.raises(RuntimeError, match="did not become ready"):
+        asyncio.run(m.get_bot_messages("coder"))
+
+
+# ---------------------------------------------------------------------------
 # Push notifications -- SendMessage.notify wiring (bot_send) and the
 # /push/* endpoints. See push.py's own module docstring for why this
 # exists and why it's real Web Push, not a same-tab Notification() call.

@@ -650,6 +650,15 @@ async def get_bot_activity(profile: str) -> dict:
 
 
 async def get_bot_messages(profile: str, limit: int = 200) -> list[dict]:
+    # Real bug found live: this read path had no ensure_bot_process_running
+    # call of its own, unlike send_to_bot/stream_to_bot -- it silently
+    # relied on bot_wake's own fire-and-forget pre-warm (errors swallowed
+    # there by design) having already run. A worker that died after its
+    # last chat (idle-reaped, OOM-killed, or never started at all) left
+    # this endpoint 500ing with a raw connection error instead of
+    # transparently respawning it, same as every other bot-facing route.
+    if _engine._use_http():
+        await bot_processes.ensure_bot_process_running(profile)
     return await _engine.get_bot_messages(profile, API_SERVER_KEY, limit=limit)
 
 

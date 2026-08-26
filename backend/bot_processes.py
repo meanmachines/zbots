@@ -123,12 +123,35 @@ async def ensure_bot_process_running(profile: str) -> int:
     tracked as alive. Safe to call on every chat request -- the common
     case (already running) costs one liveness check and returns
     immediately without touching the network.
+
+    Real bug found live: a dead worker's pid can be recycled by the OS for
+    an unrelated later process (confirmed live -- two different profiles'
+    registry entries pointing at the same pid, in a container with a small
+    enough pid space for this to actually happen), which makes
+    _is_worker_alive report a stale entry as alive and skip respawning it.
+    This never misroutes a request (each profile still has its own port,
+    so _wait_ready below is the real check, not the pid), but left
+    uncorrected it would 30s-timeout-then-fail on *every* future call for
+    that profile forever, since nothing ever cleared the bad registry
+    entry. Self-heal: if the trusted-alive path's own _wait_ready still
+    fails, treat that pid as a false positive, forget it, and spawn a real
+    replacement before giving up.
     """
     port = get_port(profile)
+    spawned = False
     async with _lock:
         if not _is_worker_alive(profile):
             _spawn(profile, port)
-    await _wait_ready(port)
+            spawned = True
+    try:
+        await _wait_ready(port)
+    except RuntimeError:
+        if spawned:
+            raise
+        async with _lock:
+            _forget_worker(profile)
+            _spawn(profile, port)
+        await _wait_ready(port)
     return port
 
 

@@ -216,6 +216,34 @@ tagged on `main`.
     `task`-bot fresh-session behavior, the `/wake` endpoint).
 
 ### Fixed
+- Two real worker-liveness bugs found live on zbots-dev while verifying
+  the steering feature above: a `docker exec` into the container showed
+  the on-disk worker registry claiming six bots' workers were running,
+  when only one process was actually alive -- every other recorded pid
+  was dead, and two entries (`default` and `coder`) had converged on the
+  exact same pid (a dead worker's pid recycled by the OS for an unrelated
+  later worker -- a real hazard in a container with a small pid space).
+  - `GET /bots/{name}/messages` never called `ensure_bot_process_running`
+    at all, unlike every other bot-facing route -- it silently depended on
+    `/bots/{name}/wake`'s own fire-and-forget pre-warm (errors swallowed
+    there by design) having already run. A worker that died since its
+    last chat (idle-reaped, crashed, or never started) 500'd with a raw
+    connection error instead of transparently respawning. Now calls
+    `ensure_bot_process_running` first, matching `send_to_bot`/
+    `stream_to_bot`'s own established pattern.
+  - `bot_processes.ensure_bot_process_running` trusted a registry pid's
+    raw liveness (`os.kill(pid, 0)`) to decide whether to skip spawning --
+    a recycled pid makes that check lie, and since nothing ever cleared
+    the stale entry, every future call for that profile would 30s-timeout
+    on its own `_wait_ready` poll and fail, forever, until a manual fix.
+    Now self-heals: if the trusted-alive path's own readiness poll still
+    fails, the stale entry is forgotten and a real replacement is spawned
+    before giving up.
+  - Covered by new tests in `test_bot_processes.py` (pid-reuse false
+    positive self-heals; a genuinely dead replacement still raises) and
+    `test_backend.py` (`/bots/{name}/messages` ensures the worker under
+    http transport, skips it under embedded, surfaces a worker that never
+    becomes ready).
 - Branding leaks in zBots' own frontend chrome (labels, error banners, a
   confirm dialog) and one backend API error message, found via a full
   audit of every "hermes" mention in zBots' own (non-vendored) code --
