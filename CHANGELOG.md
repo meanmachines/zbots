@@ -216,6 +216,22 @@ tagged on `main`.
     `task`-bot fresh-session behavior, the `/wake` endpoint).
 
 ### Fixed
+- `stream_to_bot`'s own run_id capture (added for `/bots/{name}/steer`
+  above) only ever recorded the FIRST attempt's run_id and never updated
+  it on a rollover retry -- confirmed live, and NOT the rare edge case its
+  own docstring assumed: a `developer`-category bot resuming its existing
+  session hit a rollover on literally the first call against a freshly
+  redeployed container. Attempt 1's run_id belongs to a run that's already
+  dead by the time the retry starts (that's why it retried), so any steer
+  landing after rollover -- which is exactly when a real user's steer is
+  most likely to land, since the rollover's own recap note takes real time
+  to generate and stream -- always targeted a finished run, silently fell
+  through to the slow `send_to_bot` fallback, and (reproduced live) blew
+  straight through Cloudflare's edge timeout (524), since that fallback
+  call can genuinely run long. `_capture_run_id` now keeps overwriting on
+  every frame from both the first attempt and the retry, so a steer always
+  targets whatever's actually still running. Covered by a new test in
+  `test_engine_streaming.py`.
 - Two real worker-liveness bugs found live on zbots-dev while verifying
   the steering feature above: a `docker exec` into the container showed
   the on-disk worker registry claiming six bots' workers were running,

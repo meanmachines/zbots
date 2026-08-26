@@ -214,6 +214,54 @@ def test_stream_to_bot_leaves_run_id_unset_when_no_frame_carries_one(monkeypatch
     assert "run_id" not in state
 
 
+def test_stream_to_bot_updates_run_id_from_the_rollover_retry(monkeypatch):
+    # Real bug found live: attempt 1's own run_id belongs to a run that's
+    # already dead by the time a rollover retry starts (that's WHY it
+    # retried) -- confirmed on zbots-dev with a "developer"-category bot
+    # resuming its existing session, which hit this on the very first call
+    # against a fresh container, not just the rare documented edge case.
+    # Before this fix, state["run_id"] stayed pinned to attempt 1's dead
+    # run for the rest of the stream, so a steer sent after rollover but
+    # before this fix would always target a finished run and silently fall
+    # through to the slow send_to_bot fallback -- observed live blowing
+    # through Cloudflare's edge timeout (524).
+    attempts = [
+        [(_frame("run.started", {"run_id": "run_dead_attempt_1"}), False),
+         (_frame("done", {}), True)],
+        [(_frame("run.started", {"run_id": "run_live_attempt_2"}), False),
+         (_frame("assistant.delta", {"delta": "hi"}), False)],
+    ]
+    monkeypatch.setattr(engine, "_context_bridge_note", _AsyncMock_returns(""))
+    state = _drain_with_state(monkeypatch, attempts)
+    assert state["run_id"] == "run_live_attempt_2"
+
+
+def _AsyncMock_returns(value):
+    async def _f(*args, **kwargs):
+        return value
+
+    return _f
+
+
+def _drain_with_state(monkeypatch, attempts):
+    calls = iter(attempts)
+
+    def _next_attempt(profile, session_id, message, headers):
+        return _fake_attempt(next(calls))(profile, session_id, message, headers)
+
+    monkeypatch.setattr(engine, "_run_stream_attempt", _next_attempt)
+    monkeypatch.setattr(engine, "_ensure_bot_chat_session", _fake_ensure_session)
+    monkeypatch.setattr(engine, "_roll_over_bot_session", _fake_roll_over)
+
+    async def _run():
+        state, chunks = await engine.stream_to_bot("default", "hi", "key", None)
+        async for _frame_ in chunks:
+            pass
+        return state
+
+    return asyncio.run(_run())
+
+
 def test_no_rollover_forwards_every_frame_including_the_real_completion(monkeypatch):
     attempt_1 = [
         (_frame("tool.started", {"tool_name": "list_bots"}), False),

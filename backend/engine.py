@@ -1094,26 +1094,40 @@ async def stream_to_bot(
     # never treats those as an answer, so forwarding them early is still
     # harmless. Only the frames that could be mistaken for a final answer
     # are held back until the whole attempt is known not to need a retry.
+    def _capture_run_id(frame: bytes) -> None:
+        # Real bug found live: main.py's own /bots/{name}/steer needs a
+        # run_id to inject guidance into this run while it's still going
+        # (POST /v1/runs/{run_id}/steer -- see steer_run's own docstring).
+        # api_server stamps run_id onto EVERY event's payload (_event_
+        # payload's own payload.setdefault), so a plain byte search on
+        # whichever frame arrives is enough -- no need to touch
+        # _process_sse_frame's own narrower assistant.delta/completed-only
+        # parsing. `state` is the same dict main.py already holds a live
+        # reference to, so this is visible to a concurrent /steer call the
+        # moment it's found, not just after the whole stream drains.
+        #
+        # Deliberately keeps overwriting on every frame instead of only
+        # the first (the original version of this fix) -- confirmed live
+        # that a rollover retry is NOT the rare edge case its own docstring
+        # assumed: a "developer"-category bot resuming its existing session
+        # hit it on literally the very first call in a fresh container.
+        # Attempt 1's own run_id belongs to a run that's already dead by
+        # the time the retry starts (that's WHY it retried), so a steer
+        # landing after rollover but before this fix would always target a
+        # finished run, silently fall through to the slow send_to_bot
+        # fallback, and -- observed live -- blow straight through
+        # Cloudflare's edge timeout (524) since that fallback call can
+        # genuinely run long. Always tracking the latest run_id seen keeps
+        # a steer aimed at whatever's actually still running.
+        run_id_match = _RUN_ID_FRAME_RE.search(frame)
+        if run_id_match:
+            state["run_id"] = run_id_match.group(1).decode("ascii", errors="replace")
+
     async def _chunks():
         saw_error = False
         pending: list[bytes] = []
         async for frame, was_error in _run_stream_attempt(profile, state["session_id"], message, headers):
-            # Real bug found live: main.py's own /bots/{name}/steer needs a
-            # run_id to inject guidance into this run while it's still
-            # going (POST /v1/runs/{run_id}/steer -- see steer_run's own
-            # docstring), but nothing captured one before this. api_server
-            # stamps run_id onto EVERY event's payload (_event_payload's
-            # own payload.setdefault), so a plain byte search on whichever
-            # frame arrives first is enough -- no need to touch
-            # _process_sse_frame's own narrower assistant.delta/completed-
-            # only parsing. `state` is the same dict main.py already holds
-            # a live reference to, so this is visible to a concurrent
-            # /steer call the moment it's found, not just after the whole
-            # stream drains.
-            if "run_id" not in state:
-                run_id_match = _RUN_ID_FRAME_RE.search(frame)
-                if run_id_match:
-                    state["run_id"] = run_id_match.group(1).decode("ascii", errors="replace")
+            _capture_run_id(frame)
             saw_error = saw_error or was_error
             if frame.startswith((b"event: assistant.completed", b"event: run.completed", b"event: error")):
                 pending.append(frame)
@@ -1128,6 +1142,7 @@ async def stream_to_bot(
         state["session_id"] = new_sid
         retry_message = (note + message) if note else message
         async for frame, _was_error in _run_stream_attempt(profile, new_sid, retry_message, headers):
+            _capture_run_id(frame)
             yield frame
 
     return state, _chunks()
