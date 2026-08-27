@@ -548,6 +548,34 @@ input:focus, textarea:focus, select:focus {
   font-size: 0.78rem;
   max-width: 90%;
 }
+/* Task-list snapshot hermes-agent's own todo tool re-injects across a
+   context-compression boundary -- see renderTodoInjectionBanner's own
+   comment in app.js. Structurally a user message, but shown wide and
+   centered like other system status, not as a right-aligned pill. */
+.msg.system.todo-banner {
+  align-self: center;
+  max-width: 85%;
+  width: 100%;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) * 0.5);
+  padding: 0.6rem 0.85rem;
+  font-size: 0.82rem;
+}
+.todo-banner-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 0.3rem;
+}
+.todo-banner-list { display: flex; flex-direction: column; gap: 0.2rem; }
+.todo-banner-item { color: var(--text); }
+.todo-banner-item.todo-status-in_progress { color: var(--primary); font-weight: 600; }
+.todo-banner-item.todo-status-completed { color: var(--success); text-decoration: line-through; opacity: 0.75; }
+.todo-banner-item.todo-status-cancelled { color: var(--text-muted); text-decoration: line-through; opacity: 0.6; }
+.todo-banner-item.todo-status-pending { color: var(--text-muted); }
+.todo-banner-raw { white-space: pre-wrap; color: var(--text-muted); }
 .msg-from {
   font-size: 0.72rem;
   color: var(--text-muted);

@@ -814,6 +814,25 @@ function renderMessages(rows, kind, previewPaths, activityGroups) {
     }
 
     const isUser = kind === "bot" ? row.role === "user" : row.from === "user";
+    const text = messageText(row, kind);
+
+    // hermes-agent's own todo tool folds a task-list snapshot into a real
+    // user message across a context-compression boundary (see
+    // TODO_INJECTION_HEADER in vendor/hermes-agent/tools/todo_tool.py) --
+    // structurally a user row, but it's synthetic status the agent injected
+    // for itself, not something the person typed. Rendering it as a normal
+    // right-aligned user pill (worse, one the new long-prompt fold would
+    // hide behind "Show more") buries exactly the kind of status a viewer
+    // wants visible at a glance -- give it its own wide checklist banner
+    // instead, matching how the real hermes-agent desktop app shows it.
+    if (isUser && typeof text === "string" && text.startsWith(TODO_INJECTION_HEADER)) {
+      const banner = renderTodoInjectionBanner(text);
+      if (i >= animateFrom) banner.classList.add("msg-pop");
+      pane.appendChild(banner);
+      anchors.push({ node: banner, ts: ts || 0 });
+      return;
+    }
+
     const div = document.createElement("div");
     div.className = "msg " + (isUser ? "user" : "bot");
     if (kind === "group" && !isUser) {
@@ -822,7 +841,6 @@ function renderMessages(rows, kind, previewPaths, activityGroups) {
       label.textContent = row.from;
       div.appendChild(label);
     }
-    const text = messageText(row, kind);
     const body = document.createElement("div");
     body.className = "msg-body";
     body.innerHTML = renderMarkdown(text);
@@ -1012,6 +1030,15 @@ function toolStatusLabel(toolName, preview, args) {
       const command = args && args.command;
       return command ? `Started: ${truncateMiddle(command, 60)}` : "Managing a background process";
     }
+    case "todo": {
+      const todos = (args && args.todos) || null;
+      if (!todos || !todos.length) return "Checked task list";
+      const active = todos.find((t) => t && t.status === "in_progress");
+      if (active && active.content) return `Task list: ${truncateMiddle(active.content, 50)}`;
+      const done = todos.filter((t) => t && t.status === "completed").length;
+      const pending = todos.filter((t) => t && (t.status === "pending" || t.status === "in_progress")).length;
+      return `Updated task list (${done}/${todos.length} done, ${pending} left)`;
+    }
     default:
       // Humanize an unmapped tool name -- "web_search" -> "Using web search".
       return "Using " + bare.replace(/_/g, " ");
@@ -1106,9 +1133,20 @@ function createActivityCard(wrap, toolName, preview, args) {
   return card;
 }
 
+// Same marker convention as TodoStore.format_for_injection in
+// vendor/hermes-agent/tools/todo_tool.py, reused here so a live "todo"
+// activity card and the post-compression injection banner (see
+// renderTodoInjectionBanner) read as the same idea, not two different ones.
+const TODO_STATUS_MARKER = { completed: "[x]", in_progress: "[>]", pending: "[ ]", cancelled: "[~]" };
+
+function formatTodoChecklist(todos) {
+  return todos.map((t) => `${TODO_STATUS_MARKER[t && t.status] || "[?]"} ${(t && t.content) || ""}`).join("\n");
+}
+
 function activityCardInitialBody(toolName, args) {
   if (toolName === "write_file" && args && typeof args.content === "string") return args.content;
   if (toolName === "terminal" && args && args.command) return args.command;
+  if (toolName === "todo" && args && Array.isArray(args.todos) && args.todos.length) return formatTodoChecklist(args.todos);
   return null;
 }
 
@@ -1597,6 +1635,45 @@ function applyUserMessageFold(div, text) {
     toggle.textContent = expanded ? "Show less" : "Show more";
   });
   div.appendChild(toggle);
+}
+
+// Mirrors TODO_INJECTION_HEADER in vendor/hermes-agent/tools/todo_tool.py
+// exactly -- that's the stable string the backend itself uses to recognize
+// its own injected snapshot, so this has to match verbatim, not just look
+// similar.
+const TODO_INJECTION_HEADER = "[Your active task list was preserved across context compression]";
+const TODO_MARKER_STATUS = { x: "completed", ">": "in_progress", " ": "pending", "~": "cancelled" };
+
+function renderTodoInjectionBanner(text) {
+  const div = document.createElement("div");
+  div.className = "msg system todo-banner";
+  const label = document.createElement("div");
+  label.className = "todo-banner-label";
+  label.textContent = "Task list";
+  div.appendChild(label);
+
+  const list = document.createElement("div");
+  list.className = "todo-banner-list";
+  let matched = false;
+  for (const line of text.split("\n").slice(1)) {
+    const m = line.match(/^-\s*\[([x>~ ])\]\s*(.+)$/);
+    if (!m) continue;
+    matched = true;
+    const row = document.createElement("div");
+    row.className = "todo-banner-item todo-status-" + (TODO_MARKER_STATUS[m[1]] || "pending");
+    row.textContent = m[2];
+    list.appendChild(row);
+  }
+  div.appendChild(list);
+  if (!matched) {
+    // Unexpected shape (e.g. a future format change) -- fall back to the
+    // raw text rather than silently showing an empty banner.
+    const raw = document.createElement("div");
+    raw.className = "todo-banner-raw";
+    raw.textContent = text;
+    div.appendChild(raw);
+  }
+  return div;
 }
 
 // Consumes the backend's SSE proxy (see stream_to_bot() in main.py) and
