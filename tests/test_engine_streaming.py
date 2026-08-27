@@ -452,6 +452,58 @@ def test_context_bridge_note_swallows_an_exception(monkeypatch):
     assert note == ""
 
 
+def test_context_bridge_note_does_not_compound_across_repeat_rollovers(monkeypatch):
+    # Real bug found live: _rollover_and_retry persists "<note><original
+    # message>" as the new session's own first user message. A second
+    # rollover off THAT session pulled this combined text straight into
+    # its own recap unstripped, so a bot that rolled over repeatedly grew
+    # a recap quoting a recap quoting a recap, each one more truncated
+    # than the last.
+    async def fake_call_handler(handler_name, *, profile, method, path, query=None, headers=None, match_info=None):
+        return 200, {
+            "data": [
+                {"role": "user", "content": "set up a water reminder"},
+                {"role": "assistant", "content": "Done. Want it hourly, or a different cadence?"},
+            ]
+        }
+
+    monkeypatch.setattr(engine, "_call_handler", fake_call_handler)
+    first_note = asyncio.run(engine._context_bridge_note("default", "old-sid", {}))
+    bridged_replay = first_note + "it should remind every 5 minute"
+
+    async def fake_call_handler_2(handler_name, *, profile, method, path, query=None, headers=None, match_info=None):
+        return 200, {"data": [{"role": "user", "content": bridged_replay}]}
+
+    monkeypatch.setattr(engine, "_call_handler", fake_call_handler_2)
+    second_note = asyncio.run(engine._context_bridge_note("default", "new-sid", {}))
+    assert "it should remind every 5 minute" in second_note
+    assert engine._CONTEXT_BRIDGE_PREFIX not in second_note.split("\n", 1)[-1]
+    assert second_note.count(engine._CONTEXT_BRIDGE_PREFIX) == 1
+
+
+def test_strip_full_context_bridge_note_recovers_original_text(monkeypatch):
+    async def fake_call_handler(handler_name, *, profile, method, path, query=None, headers=None, match_info=None):
+        return 200, {"data": [{"role": "user", "content": "set up a water reminder"}]}
+
+    monkeypatch.setattr(engine, "_call_handler", fake_call_handler)
+    note = asyncio.run(engine._context_bridge_note("default", "old-sid", {}))
+    bridged = note + "it should remind every 5 minute"
+    assert engine._strip_full_context_bridge_note(bridged) == "it should remind every 5 minute"
+
+
+def test_strip_full_context_bridge_note_is_a_noop_on_plain_text():
+    assert engine._strip_full_context_bridge_note("just a normal message") == "just a normal message"
+
+
+def test_strip_full_context_bridge_note_is_a_noop_when_marker_missing():
+    # Unlike strip_context_bridge_note (which only ever sees the engine's
+    # own pre-truncated preview and must fall back to a placeholder), this
+    # helper is fed the full untruncated message text -- if the marker is
+    # somehow still missing, leave the text alone rather than guessing.
+    truncated = "[A brief technical hiccup just restarted this conversation o..."
+    assert engine._strip_full_context_bridge_note(truncated) == truncated
+
+
 def test_send_to_bot_prepends_the_note_to_the_retried_message(monkeypatch):
     # http transport, not embedded -- avoids _profile_scope's embedded
     # branch constructing the real vendored adapter (which needs packages

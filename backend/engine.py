@@ -561,6 +561,32 @@ def strip_context_bridge_note(text: str) -> str:
     return text
 
 
+def _strip_full_context_bridge_note(text: str) -> str:
+    """Same recognition as strip_context_bridge_note, but for a caller (only
+    _context_bridge_note itself) holding the full, untruncated message text
+    straight from the messages endpoint rather than the engine's own
+    pre-truncated roster preview -- here the end marker is reliably still
+    present, so the real original text can be recovered instead of falling
+    back to a placeholder.
+
+    Real bug found live: without this, a bot that rolled over more than
+    once grew a recap quoting a previous recap quoting a previous recap,
+    each one more truncated than the last (a rollover's retry persists
+    "<note><original message>" as the new session's own first user
+    message -- see _rollover_and_retry -- and a later rollover off THAT
+    session pulled this combined text straight into its own recap
+    unstripped). Applied to every row before it's quoted, so only ever the
+    real underlying message is recapped, however many times a session has
+    rolled over.
+    """
+    if not text.startswith(_CONTEXT_BRIDGE_PREFIX):
+        return text
+    idx = text.find(_CONTEXT_BRIDGE_END_MARKER)
+    if idx == -1:
+        return text
+    return text[idx + len(_CONTEXT_BRIDGE_END_MARKER):]
+
+
 async def _context_bridge_note(profile: str, old_session_id: str, headers: dict) -> str:
     """Real bug found live: a rollover swaps in a genuinely fresh session
     with zero conversational memory, even though get_bot_messages' own
@@ -608,7 +634,7 @@ async def _context_bridge_note(profile: str, old_session_id: str, headers: dict)
             role = row.get("role")
             if role not in ("user", "assistant"):
                 continue
-            text = _message_text(row).strip()
+            text = _strip_full_context_bridge_note(_message_text(row)).strip()
             if not text:
                 continue
             lines.append(f"{'You' if role == 'assistant' else 'User'}: {text[:300]}")
