@@ -1124,13 +1124,24 @@ function createActivityCard(wrap, toolName, preview, args) {
   if (bodyText != null) {
     const pre = document.createElement("pre");
     pre.className = "activity-card-body";
-    pre.textContent = bodyText;
+    const lang = activityCardLanguage(toolName, args);
+    pre.innerHTML = lang ? highlightCode(bodyText, lang) : mdEscape(bodyText);
     card.appendChild(pre);
   }
   wrap.appendChild(card);
   const pane = document.getElementById("messages-pane");
   pane.scrollTop = pane.scrollHeight;
   return card;
+}
+
+// write_file/read_file carry a real path to infer a language from (see
+// languageForPath in markdown.js); terminal's body is always a shell
+// command. todo's checklist body is deliberately left unhighlighted -- it's
+// not code.
+function activityCardLanguage(toolName, args) {
+  if (toolName === "write_file" || toolName === "read_file") return languageForPath(args && args.path);
+  if (toolName === "terminal") return "bash";
+  return null;
 }
 
 // Same marker convention as TodoStore.format_for_injection in
@@ -1170,7 +1181,8 @@ async function fillReadFileActivityCardBody(card, path) {
   }
   const pre = document.createElement("pre");
   pre.className = "activity-card-body";
-  pre.textContent = content;
+  const lang = languageForPath(path);
+  pre.innerHTML = lang ? highlightCode(content, lang) : mdEscape(content);
   card.appendChild(pre);
 }
 
@@ -1443,15 +1455,19 @@ async function openWorkspaceFile(path) {
   showWorkspaceTab("viewer");
   document.getElementById("workspace-file-viewer-name").textContent = path;
   const body = document.getElementById("workspace-file-viewer-body");
+  const lang = languageForPath(path);
+  const renderBody = (content) => {
+    body.innerHTML = lang ? highlightCode(content, lang) : mdEscape(content);
+  };
   if (cached && cached.content != null) {
-    body.textContent = cached.content;
+    renderBody(cached.content);
     return;
   }
   body.textContent = "Loading…";
   try {
     const result = await apiGet(`/bots/${selected.id}/workspace/file?path=${encodeURIComponent(path)}`);
     if (cached) cached.content = result.content; // fill the cache in place so re-opening is instant
-    body.textContent = result.content;
+    renderBody(result.content);
   } catch (e) {
     body.textContent = "Could not load this file.";
   }

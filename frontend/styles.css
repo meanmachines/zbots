@@ -16,6 +16,14 @@
   --ring: #525252;
   --radius: 0.75rem;
   --font: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  /* Syntax-highlight palette (see highlightCode in markdown.js) -- kept as
+     its own set of tokens rather than reusing --primary/--success/etc. so
+     code coloring can be tuned without touching the rest of the theme. */
+  --hl-kw: #7aa2f7;
+  --hl-str: #9ece6a;
+  --hl-num: #e0af68;
+  --hl-const: #bb9af7;
+  --hl-key: #f7768e;
 }
 
 * { box-sizing: border-box; }
@@ -1187,6 +1195,17 @@ details.advanced summary { cursor: pointer; font-size: 0.82rem; color: var(--tex
 }
 .msg-body pre code { background: transparent; border: none; padding: 0; font-size: 0.82rem; }
 .msg-body h1, .msg-body h2, .msg-body h3 { margin: 0.5rem 0 0.3rem; line-height: 1.25; }
+
+/* Syntax highlighting -- shared by fenced ```lang blocks in a bot's prose
+   (.msg-body pre code), activity-card bodies (write_file/read_file/
+   terminal), and the Workspace file viewer, since highlightCode's output
+   (markdown.js) uses these same span classes everywhere it's called. */
+.hl-kw { color: var(--hl-kw); }
+.hl-str { color: var(--hl-str); }
+.hl-num { color: var(--hl-num); }
+.hl-const { color: var(--hl-const); }
+.hl-key { color: var(--hl-key); }
+.hl-com { color: var(--text-muted); font-style: italic; }
 
 .msg-day-sep {
   align-self: center;
