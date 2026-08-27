@@ -827,6 +827,7 @@ function renderMessages(rows, kind, previewPaths, activityGroups) {
     body.className = "msg-body";
     body.innerHTML = renderMarkdown(text);
     div.appendChild(body);
+    if (isUser) applyUserMessageFold(div, text);
 
     const meta = document.createElement("div");
     meta.className = "msg-meta";
@@ -1565,8 +1566,37 @@ function appendOptimisticUserMessage(text) {
   body.className = "msg-body";
   body.innerHTML = renderMarkdown(text);
   div.appendChild(body);
+  applyUserMessageFold(div, text);
   pane.appendChild(div);
   pane.scrollTop = pane.scrollHeight;
+}
+
+// Real UX gap found live: a long, detailed prompt (a multi-step task spec,
+// or any user turn a rollover's recap note got prepended to -- see
+// _context_bridge_note in engine.py) rendered at full height visually
+// swamps the thread, since .msg.user has no length cap of its own (only a
+// WIDTH cap -- see .msg's max-width). The model's own real output often
+// reads as comparatively tiny next to it even when it did substantial
+// work, since most of that work lives in collapsed activity cards, not
+// prose. Folds long user turns behind a "Show more" toggle instead of
+// touching how the model's own output renders -- the input, not the
+// output, is what was making the balance feel backwards.
+const USER_MESSAGE_FOLD_CHARS = 500;
+
+function applyUserMessageFold(div, text) {
+  if (!text || text.length <= USER_MESSAGE_FOLD_CHARS) return;
+  div.classList.add("msg-folded");
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "msg-fold-toggle";
+  toggle.textContent = "Show more";
+  toggle.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const expanded = div.classList.toggle("msg-expanded");
+    div.classList.toggle("msg-folded", !expanded);
+    toggle.textContent = expanded ? "Show less" : "Show more";
+  });
+  div.appendChild(toggle);
 }
 
 // Consumes the backend's SSE proxy (see stream_to_bot() in main.py) and

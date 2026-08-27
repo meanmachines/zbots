@@ -501,6 +501,37 @@ input:focus, textarea:focus, select:focus {
   padding: 0.65rem 1.05rem;
   border-radius: 1.35rem;
 }
+/* Long-prompt fold -- see applyUserMessageFold's own comment in app.js for
+   why this exists: a lengthy user turn (a detailed task spec, or a
+   rollover's recap note glued onto one) has no length cap otherwise, only
+   a width one, and visually swamps the model's own real output. */
+.msg.user.msg-folded .msg-body {
+  max-height: 6.4rem;
+  overflow: hidden;
+  position: relative;
+}
+.msg.user.msg-folded .msg-body::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2.2rem;
+  background: linear-gradient(to bottom, transparent, var(--primary));
+}
+.msg-fold-toggle {
+  display: block;
+  margin-top: 0.4rem;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--primary-fg);
+  opacity: 0.8;
+  font-size: 0.78rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.msg-fold-toggle:hover { opacity: 1; }
 .msg.bot {
   /* Grok/ChatGPT-style assistant turn: flowing plain text, no bubble --
      only the user's own messages get a boxed pill. */
