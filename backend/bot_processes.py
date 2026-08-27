@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
+import psutil
 
 try:
     from . import bot_worker
@@ -213,6 +214,47 @@ def is_running(profile: str) -> bool:
     """Non-blocking liveness check for the roster/status surfaces --
     unlike ensure_bot_process_running, never spawns anything."""
     return _is_worker_alive(profile)
+
+
+def listening_ports(profile: str) -> list[dict]:
+    """Every TCP port a live dev server this bot's own tools started is
+    currently listening on, found by walking the worker's own process tree.
+    The vendored process/terminal tools have no concept of ports at all
+    (confirmed live: no port field anywhere in process_registry.py's or
+    terminal_tool.py's own events) -- this is the one reliable way to know
+    "is there a live preview to show" without any bot behavior change or
+    new tool. Safe only because a background process a bot starts shares
+    this same container/process tree (see bot_worker.py's own module
+    docstring) -- there's no sandbox boundary to cross.
+    """
+    worker = _read_registry()["workers"].get(profile)
+    if not worker:
+        return []
+    pid = int(worker["pid"])
+    if not _pid_alive(pid):
+        return []
+    try:
+        root = psutil.Process(pid)
+        candidate_pids = {pid} | {p.pid for p in root.children(recursive=True)}
+    except psutil.NoSuchProcess:
+        return []
+    ports: dict[int, int] = {}
+    for candidate_pid in candidate_pids:
+        try:
+            proc = psutil.Process(candidate_pid)
+            # net_connections() is the current psutil name; connections()
+            # is the same call under the name older psutil releases still
+            # ship, kept as a fallback so this doesn't pin a version.
+            try:
+                conns = proc.net_connections(kind="inet")
+            except AttributeError:
+                conns = proc.connections(kind="inet")
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        for conn in conns:
+            if conn.status == psutil.CONN_LISTEN and conn.laddr:
+                ports[conn.laddr.port] = candidate_pid
+    return [{"port": port, "pid": owner_pid} for port, owner_pid in sorted(ports.items())]
 
 
 async def reap_idle(*, idle_since: dict[str, float], keep_warm: set[str], threshold_s: float) -> list[str]:

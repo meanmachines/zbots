@@ -35,9 +35,9 @@ from pathlib import Path
 from typing import Any, Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 # Loopback defaults match the reference deployment (hermes-agent-wrapper runs
@@ -1246,6 +1246,65 @@ async def get_workspace_file(name: str, path: str) -> dict:
     except OSError as exc:
         raise HTTPException(status_code=404, detail=f"Could not read file: {exc}")
     return {"path": path, "content": content}
+
+
+@app.get("/bots/{name}/workspace/ports")
+async def get_workspace_ports(name: str) -> list[dict]:
+    """Is this bot's own terminal/process tooling currently running a dev
+    server, and on what port -- drives the workspace panel's live preview
+    tab. See bot_processes.listening_ports's own docstring for why this has
+    to walk the process tree instead of asking the tools themselves."""
+    name = _validate_name(name)
+    return bot_processes.listening_ports(name)
+
+
+_PREVIEW_HOP_BY_HOP_HEADERS = {
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailers", "transfer-encoding", "upgrade", "content-length", "content-encoding",
+}
+
+
+@app.api_route("/bots/{name}/preview/{port}/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+async def preview_bot_port(name: str, port: int, path: str, request: Request) -> Response:
+    """Reverse proxy into a dev server this bot's own tools started, for the
+    workspace panel's live preview iframe. Scoped to a port ONLY while
+    get_workspace_ports's own check just confirmed this bot's own process
+    tree is actually listening on it -- this can't be used to reach an
+    arbitrary port on the host. Every method proxied (not just GET) since a
+    previewed page's own client-side JS may call its own backend via
+    relative fetch()es that land back on this same origin.
+
+    Known limitation, not solved here: an absolute-root asset reference in
+    the previewed page itself (e.g. <script src="/app.js">) resolves
+    against THIS app's own origin, not back through this proxy prefix, and
+    will 404 -- fixing that needs real HTML/asset rewriting, out of scope
+    for a dev-server preview. A relative reference, or a page with no
+    absolute asset paths (the common case for a small dev server), works
+    fine.
+    """
+    name = _validate_name(name)
+    live_ports = {p["port"] for p in bot_processes.listening_ports(name)}
+    if port not in live_ports:
+        raise HTTPException(status_code=404, detail="This bot has nothing listening on that port right now.")
+    body = await request.body()
+    upstream_headers = {k: v for k, v in request.headers.items() if k.lower() not in ("host", "content-length")}
+    url = f"http://127.0.0.1:{port}/{path}"
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            upstream = await client.request(
+                request.method, url, params=request.query_params, headers=upstream_headers, content=body
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Could not reach the dev server: {exc}")
+    response_headers = {
+        k: v for k, v in upstream.headers.items() if k.lower() not in _PREVIEW_HOP_BY_HOP_HEADERS
+    }
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        headers=response_headers,
+        media_type=upstream.headers.get("content-type"),
+    )
 
 
 @app.post("/bots/{name}/wake")

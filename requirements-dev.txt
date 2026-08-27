@@ -10,5 +10,6 @@ httpx
 python-multipart
 mcp==2.0.0
 pywebpush
+psutil
 pytest
 pytest-asyncio

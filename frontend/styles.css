@@ -790,6 +790,17 @@ input:focus, textarea:focus, select:focus {
   align-items: center;
 }
 #workspace-header h2 { font-size: 0.88rem; margin: 0; }
+#workspace-tabs { display: flex; gap: 0.3rem; }
+.workspace-tab {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) * 0.5);
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  padding: 0.25rem 0.6rem;
+  cursor: pointer;
+}
+.workspace-tab.active { background: var(--accent); color: var(--text); border-color: transparent; }
 #workspace-files-list { padding: 0.6rem; display: flex; flex-direction: column; gap: 0.3rem; overflow-y: auto; }
 #workspace-files-empty { padding: 0.6rem 0.5rem; font-size: 0.8rem; color: var(--text-muted); }
 .workspace-file-row {
@@ -832,6 +843,18 @@ input:focus, textarea:focus, select:focus {
   white-space: pre-wrap;
   word-break: break-word;
 }
+#workspace-preview { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+#workspace-preview-header {
+  padding: 0.7rem 0.9rem;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+}
+#workspace-preview-open { color: var(--text-muted); }
+#workspace-preview-frame { flex: 1; min-height: 0; border: none; background: #fff; }
 
 /* ---------- Modals ---------- */
 

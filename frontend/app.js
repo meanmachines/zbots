@@ -727,6 +727,7 @@ async function selectBot(name) {
   document.body.classList.add("chat-open");
   document.getElementById("routines-pane").classList.remove("open");
   document.getElementById("workspace-pane").classList.remove("open");
+  stopWorkspacePortsPolling();
   const entry = roster.find((r) => r.name === name);
   if (entry) renderChatHeader(entry);
   showChatView();
@@ -747,6 +748,7 @@ function backToRoster() {
   selected = null;
   document.body.classList.remove("chat-open");
   clearInterval(messagesPollTimer);
+  stopWorkspacePortsPolling();
   renderRoster();
 }
 
@@ -1193,9 +1195,65 @@ function findWorkspaceFilesInHistory(rawRows) {
   return out;
 }
 
+// Three mutually-exclusive views inside one panel: the file list, a single
+// file's content, and (once something's actually listening) a live preview
+// iframe -- exactly one visible at a time, same "swap one body element"
+// shape #preview-pane already uses for image vs iframe.
+function showWorkspaceTab(tab) {
+  document.getElementById("workspace-files-list").style.display = tab === "files" ? "" : "none";
+  document.getElementById("workspace-file-viewer").style.display = tab === "viewer" ? "flex" : "none";
+  document.getElementById("workspace-preview").style.display = tab === "preview" ? "flex" : "none";
+  document.getElementById("workspace-tab-files").classList.toggle("active", tab === "files" || tab === "viewer");
+  document.getElementById("workspace-tab-preview").classList.toggle("active", tab === "preview");
+}
+
 function showWorkspaceFilesList() {
-  document.getElementById("workspace-files-list").style.display = "";
-  document.getElementById("workspace-file-viewer").style.display = "none";
+  showWorkspaceTab("files");
+}
+
+// Polled lightly while the panel is open -- see bot_processes.
+// listening_ports's own docstring for why this needs polling at all
+// (the process/terminal tools have no port concept to push an event for).
+let workspacePortsPollTimer = null;
+let workspaceLivePort = null;
+
+async function pollWorkspacePorts() {
+  if (!selected || selected.kind !== "bot") return;
+  if (!document.getElementById("workspace-pane").classList.contains("open")) return;
+  let ports;
+  try {
+    ports = await apiGet(`/bots/${selected.id}/workspace/ports`);
+  } catch (_) {
+    return; // quiet -- same convention as loadMessages's own poll-failure handling
+  }
+  const port = ports && ports.length ? ports[0].port : null;
+  if (port === workspaceLivePort) return;
+  workspaceLivePort = port;
+  const tab = document.getElementById("workspace-tab-preview");
+  if (port) {
+    tab.style.display = "";
+    document.getElementById("workspace-preview-port").textContent = `Port ${port}`;
+    const src = `${API}/bots/${selected.id}/preview/${port}/`;
+    document.getElementById("workspace-preview-frame").src = src;
+    document.getElementById("workspace-preview-open").href = src;
+  } else {
+    tab.style.display = "none";
+    document.getElementById("workspace-preview-frame").src = "about:blank";
+    if (tab.classList.contains("active")) showWorkspaceTab("files");
+  }
+}
+
+function startWorkspacePortsPolling() {
+  stopWorkspacePortsPolling();
+  pollWorkspacePorts();
+  workspacePortsPollTimer = setInterval(pollWorkspacePorts, 7000);
+}
+
+function stopWorkspacePortsPolling() {
+  clearInterval(workspacePortsPollTimer);
+  workspacePortsPollTimer = null;
+  workspaceLivePort = null;
+  document.getElementById("workspace-tab-preview").style.display = "none";
 }
 
 // Rebuilt from scratch on every call, same convention as renderMessages --
@@ -1228,9 +1286,7 @@ function renderWorkspacePanel() {
 
 async function openWorkspaceFile(path) {
   const cached = workspaceFiles.get(path);
-  document.getElementById("workspace-files-list").style.display = "none";
-  const viewer = document.getElementById("workspace-file-viewer");
-  viewer.style.display = "flex";
+  showWorkspaceTab("viewer");
   document.getElementById("workspace-file-viewer-name").textContent = path;
   const body = document.getElementById("workspace-file-viewer-body");
   if (cached && cached.content != null) {
@@ -1707,12 +1763,20 @@ document.getElementById("routines-toggle-btn").addEventListener("click", async (
 document.getElementById("workspace-toggle-btn").addEventListener("click", () => {
   const pane = document.getElementById("workspace-pane");
   pane.classList.toggle("open");
-  if (pane.classList.contains("open")) renderWorkspacePanel();
+  if (pane.classList.contains("open")) {
+    renderWorkspacePanel();
+    startWorkspacePortsPolling();
+  } else {
+    stopWorkspacePortsPolling();
+  }
 });
 document.getElementById("workspace-close-btn").addEventListener("click", () => {
   document.getElementById("workspace-pane").classList.remove("open");
+  stopWorkspacePortsPolling();
 });
 document.getElementById("workspace-file-viewer-back").addEventListener("click", showWorkspaceFilesList);
+document.getElementById("workspace-tab-files").addEventListener("click", showWorkspaceFilesList);
+document.getElementById("workspace-tab-preview").addEventListener("click", () => showWorkspaceTab("preview"));
 
 // Cross-bot nudges (one bot's routine delivering into ANOTHER bot's chat)
 // use Hermes' own real "bot-chat:<profile>" cron delivery lane -- see

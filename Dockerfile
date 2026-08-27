@@ -61,7 +61,7 @@ COPY vendor/ /opt/zbots/vendor/
 # own transitive deps (httpx2, sse-starlette, ...) come along
 # automatically and don't collide with what's already installed.
 RUN pip install --no-cache-dir -e /opt/zbots/vendor/hermes-agent \
-    && pip install --no-cache-dir fastapi uvicorn httpx python-multipart aiohttp==3.14.3 mcp==2.0.0 pywebpush
+    && pip install --no-cache-dir fastapi uvicorn httpx python-multipart aiohttp==3.14.3 mcp==2.0.0 pywebpush psutil
 
 COPY backend/ /opt/zbots/backend/
 COPY frontend/ /opt/zbots/frontend/

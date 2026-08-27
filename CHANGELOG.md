@@ -42,13 +42,33 @@ tagged on `main`.
     "Workspace" panel (`#workspace-pane`, toggled from the chat header,
     same open/close convention `#routines-pane` already established) with a
     file list and a read-only content viewer.
-  - Live preview of a bot's own running dev server (an iframe pointed at
-    whatever port a bot's `terminal`/`process` tool has bound) is scoped as
-    a follow-up -- the vendored `process`/`terminal` tools have no concept
-    of ports at all (confirmed live: no port field anywhere in
-    `process_registry.py`/`terminal_tool.py`), so that needs its own new
-    mechanism (process-tree/listening-socket introspection), not something
-    this pass's file-list work could piggyback on.
+  - Live preview of a bot's own running dev server, as a "Live" tab next to
+    Files in the same panel -- an iframe pointed at whatever port a bot's
+    `terminal`/`process` tool has bound. Since the vendored `process`/
+    `terminal` tools have no concept of ports at all (confirmed live: no
+    port field anywhere in `process_registry.py`/`terminal_tool.py`'s own
+    events), this needed its own mechanism: new `bot_processes.
+    listening_ports(profile)` walks the worker's own OS process tree
+    (`psutil`, new dependency -- hand-rolling `/proc/net/tcp` inode-to-pid
+    matching was considered and rejected as meaningfully more fragile for
+    the same result) and lists LISTEN-state sockets owned by any
+    descendant -- safe only because a background process a bot starts
+    shares zBots' own container (see `bot_worker.py`'s own module
+    docstring), not because anything about the port is otherwise trusted.
+    New `GET /bots/{name}/workspace/ports` exposes it; new
+    `GET /bots/{name}/preview/{port}/{path}` reverse-proxies every HTTP
+    method (a previewed page's own client-side JS may call its own backend
+    via relative fetches landing on this same origin) -- but only for a
+    port that same ports-check just confirmed is actually live, so it
+    can't be used to reach an arbitrary port on the host. Frontend polls
+    the ports endpoint every 7s while the panel is open; the Live tab
+    appears automatically once something's listening and disappears once
+    it's killed. Known, accepted limitation: an absolute-root asset
+    reference in the previewed page itself (`<script src="/app.js">`)
+    resolves against zBots' own origin, not back through the proxy prefix
+    -- fixing that needs real HTML/asset rewriting, out of scope for a
+    dev-server preview; a relative reference or a page with no absolute
+    asset paths (the common case for a small dev server) works fine.
 - Multi-hour autonomous "developer" bot sessions with live steering,
   matching (and improving on) a real 21.5-hour hermes-agent desktop `coder`
   session read directly off the user's own machine (`state.db`, found via

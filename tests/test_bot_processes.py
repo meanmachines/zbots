@@ -389,3 +389,107 @@ def test_reap_idle_ignores_a_bot_with_no_recorded_activity():
         bot_processes.reap_idle(idle_since={}, keep_warm=set(), threshold_s=1.0)
     )
     assert stopped == []
+
+
+# ---------------------------------------------------------------------------
+# listening_ports -- workspace panel's live-preview detection. The vendored
+# process/terminal tools have no concept of ports (confirmed live: no port
+# field anywhere in their own SSE events or persisted results), so this
+# walks the worker's own process tree instead -- real psutil.Process is
+# swapped for a fake tree/connection set below, no real sockets involved.
+# ---------------------------------------------------------------------------
+
+class _FakeAddr:
+    def __init__(self, port):
+        self.port = port
+
+
+class _FakeConn:
+    def __init__(self, status, port):
+        self.status = status
+        self.laddr = _FakeAddr(port)
+
+
+class _FakePsutilProcess:
+    """Stand-in for psutil.Process -- a fixed registry of pid -> fake
+    process (children + its own listening/other connections), looked up by
+    the SAME constructor call signature (psutil.Process(pid)) the real code
+    uses, so listening_ports needs no changes to be testable this way."""
+
+    _registry: dict[int, "_FakePsutilProcess"] = {}
+
+    def __init__(self, pid):
+        if pid not in self._registry:
+            raise bot_processes.psutil.NoSuchProcess(pid)
+        self.pid = pid
+        self._children = self._registry[pid].get("children", [])
+        self._conns = self._registry[pid].get("conns", [])
+        self._raise = self._registry[pid].get("raise")
+
+    def children(self, recursive=False):
+        return [_FakePsutilProcess(p) for p in self._children]
+
+    def net_connections(self, kind="inet"):
+        if self._raise:
+            raise self._raise
+        return self._conns
+
+    @classmethod
+    def seed(cls, registry):
+        cls._registry = registry
+
+
+def _use_fake_psutil(monkeypatch, registry):
+    _FakePsutilProcess.seed(registry)
+    monkeypatch.setattr(bot_processes.psutil, "Process", _FakePsutilProcess)
+
+
+def test_listening_ports_empty_when_no_worker_recorded():
+    assert bot_processes.listening_ports("coder") == []
+
+
+def test_listening_ports_empty_when_worker_pid_is_dead():
+    bot_processes.REGISTRY_PATH.write_text(
+        json.dumps({"ports": {"coder": 8700}, "workers": {"coder": {"pid": 2**30 - 1, "port": 8700, "started_at": 0}}})
+    )
+    assert bot_processes.listening_ports("coder") == []
+
+
+def test_listening_ports_finds_a_socket_owned_by_a_child_process(monkeypatch):
+    bot_processes.REGISTRY_PATH.write_text(
+        json.dumps({"ports": {"coder": 8700}, "workers": {"coder": {"pid": os.getpid(), "port": 8700, "started_at": 0}}})
+    )
+    _use_fake_psutil(
+        monkeypatch,
+        {
+            os.getpid(): {"children": [777], "conns": []},
+            777: {"children": [], "conns": [_FakeConn("LISTEN", 8790)]},
+        },
+    )
+    assert bot_processes.listening_ports("coder") == [{"port": 8790, "pid": 777}]
+
+
+def test_listening_ports_ignores_non_listen_connections(monkeypatch):
+    bot_processes.REGISTRY_PATH.write_text(
+        json.dumps({"ports": {"coder": 8700}, "workers": {"coder": {"pid": os.getpid(), "port": 8700, "started_at": 0}}})
+    )
+    _use_fake_psutil(
+        monkeypatch,
+        {os.getpid(): {"children": [], "conns": [_FakeConn("ESTABLISHED", 54321)]}},
+    )
+    assert bot_processes.listening_ports("coder") == []
+
+
+def test_listening_ports_survives_a_child_that_died_mid_scan(monkeypatch):
+    # Real race this guards against: a short-lived process exits between
+    # being listed as a child and being queried for its own connections.
+    bot_processes.REGISTRY_PATH.write_text(
+        json.dumps({"ports": {"coder": 8700}, "workers": {"coder": {"pid": os.getpid(), "port": 8700, "started_at": 0}}})
+    )
+    _use_fake_psutil(
+        monkeypatch,
+        {
+            os.getpid(): {"children": [], "conns": [_FakeConn("LISTEN", 8791)], "raise": bot_processes.psutil.NoSuchProcess(os.getpid())},
+        },
+    )
+    assert bot_processes.listening_ports("coder") == []  # must not raise

@@ -1212,6 +1212,81 @@ def test_get_workspace_file_404s_on_a_touched_path_that_no_longer_exists(client,
 
 
 # ---------------------------------------------------------------------------
+# Workspace panel's live preview -- GET /bots/{name}/workspace/ports and the
+# GET /bots/{name}/preview/{port}/{path} reverse proxy. See
+# bot_processes.listening_ports's own docstring for why port detection has
+# to walk the worker's process tree rather than ask the tools directly; the
+# proxy itself is scoped to a port ONLY while that same check confirms it's
+# actually live, so it can never reach an arbitrary port on the host.
+# ---------------------------------------------------------------------------
+
+def test_get_workspace_ports_returns_bot_processes_own_result(client, monkeypatch):
+    monkeypatch.setattr(m.bot_processes, "listening_ports", lambda name: [{"port": 8790, "pid": 123}])
+    resp = client.get("/bots/coder/workspace/ports")
+    assert resp.status_code == 200
+    assert resp.json() == [{"port": 8790, "pid": 123}]
+
+
+def test_preview_bot_port_404s_for_a_port_not_currently_listening(client, monkeypatch):
+    monkeypatch.setattr(m.bot_processes, "listening_ports", lambda name: [{"port": 8790, "pid": 123}])
+    # Never touches httpx at all -- the port check must short-circuit first.
+    monkeypatch.setattr(m.httpx, "AsyncClient", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not connect")))
+
+    resp = client.get("/bots/coder/preview/9999/")
+    assert resp.status_code == 404
+
+
+def _mock_httpx_client(monkeypatch, handler):
+    transport = m.httpx.MockTransport(handler)
+    real_client = m.httpx.AsyncClient
+
+    def _client(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(m.httpx, "AsyncClient", _client)
+
+
+def test_preview_bot_port_proxies_a_listening_port(client, monkeypatch):
+    monkeypatch.setattr(m.bot_processes, "listening_ports", lambda name: [{"port": 8790, "pid": 123}])
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        seen["method"] = request.method
+        return m.httpx.Response(
+            200,
+            content=b"<h1>hi</h1>",
+            headers={"content-type": "text/html", "transfer-encoding": "chunked"},
+        )
+
+    _mock_httpx_client(monkeypatch, handler)
+
+    resp = client.get("/bots/coder/preview/8790/index.html?x=1")
+    assert resp.status_code == 200
+    assert resp.content == b"<h1>hi</h1>"
+    assert resp.headers["content-type"] == "text/html"
+    assert "transfer-encoding" not in resp.headers  # hop-by-hop, must not pass through
+    assert seen["method"] == "GET"
+    assert seen["url"] == "http://127.0.0.1:8790/index.html?x=1"
+
+
+def test_preview_bot_port_proxies_a_post_with_body(client, monkeypatch):
+    monkeypatch.setattr(m.bot_processes, "listening_ports", lambda name: [{"port": 8790, "pid": 123}])
+    seen = {}
+
+    def handler(request):
+        seen["body"] = request.read()
+        return m.httpx.Response(201, content=b"created")
+
+    _mock_httpx_client(monkeypatch, handler)
+
+    resp = client.post("/bots/coder/preview/8790/keys/foo", content=b"bar")
+    assert resp.status_code == 201
+    assert seen["body"] == b"bar"
+
+
+# ---------------------------------------------------------------------------
 # Push notifications -- SendMessage.notify wiring (bot_send) and the
 # /push/* endpoints. See push.py's own module docstring for why this
 # exists and why it's real Web Push, not a same-tab Notification() call.

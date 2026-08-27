@@ -61,6 +61,10 @@
           <aside id="workspace-pane">
             <div id="workspace-header">
               <h2>Workspace</h2>
+              <div id="workspace-tabs">
+                <button id="workspace-tab-files" class="workspace-tab active">Files</button>
+                <button id="workspace-tab-preview" class="workspace-tab" style="display:none;">Live</button>
+              </div>
               <button id="workspace-close-btn" class="icon-btn" title="Close"></button>
             </div>
             <div id="workspace-files-list"></div>
@@ -70,6 +74,13 @@
                 <button id="workspace-file-viewer-back" class="icon-btn" title="Back to files"></button>
               </div>
               <pre id="workspace-file-viewer-body"></pre>
+            </div>
+            <div id="workspace-preview" style="display:none;">
+              <div id="workspace-preview-header">
+                <span id="workspace-preview-port"></span>
+                <a id="workspace-preview-open" target="_blank" rel="noopener noreferrer">Open in new tab</a>
+              </div>
+              <iframe id="workspace-preview-frame" sandbox="allow-scripts allow-forms allow-same-origin"></iframe>
             </div>
           </aside>
           <aside id="routines-pane">
