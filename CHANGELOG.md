@@ -7,6 +7,50 @@ tagged on `main`.
 ## [Unreleased]
 
 ### Added
+- Inline per-action activity cards + live narration text, replacing the
+  single generic "Thinking" panel. Real gap found live (both by reading
+  the code and by actually opening the real chat in a browser -- a
+  previous verification gap this session corrected here): the old panel
+  was one collapsed log per TURN, not per action, `toolStatusLabel` fell
+  through to a useless generic "Using write file" for the exact tools that
+  matter most (write_file/read_file/terminal/process all lacked real
+  cases despite the filename/command already being available live), and
+  none of it survived a reload -- `renderMessages` rebuilds the whole pane
+  from persisted history every poll, and the thinking panel was never more
+  than a live-only DOM node.
+  - `toolStatusLabel` gained real cases: `write_file` -> "Wrote
+    {basename}", `read_file` -> "Read {basename}", `terminal` -> "Ran:
+    {command}" (truncated), `process` -> based on `args.action`.
+  - New per-tool-call `.activity-card` (status dot, richer label, duration
+    badge, expand for real content -- write_file's own new content,
+    read_file's fetched content via the Workspace panel's existing
+    `GET /bots/{name}/workspace/file`, terminal's own command) replaces
+    the old shared text log entirely.
+  - New live narration: `assistant.delta` now streams into a collapsible
+    `.msg-narration` block (collapsed by default, dim/muted throughout,
+    matching a real hermes-agent desktop screenshot's own "Thought for
+    Xs" affordance) instead of being suppressed behind a generic
+    "Responding…" status. This reverses an earlier deliberate fix for a
+    real flicker bug (an abandoned rollover attempt's own delta text
+    looking identical to a continuing one) -- made safe this time by a
+    genuine structural fix, not just hoping it doesn't recur: `engine.py`'s
+    own `_chunks()` was read directly to confirm a rollover is visible on
+    the wire as a SECOND `event: run.started` on the same stream, so
+    `streamBotReply` now handles that event explicitly -- any `run.started`
+    beyond the first tears down and replaces the entire in-progress "turn
+    wrapper" (narration + cards), so nothing an abandoned attempt showed
+    can ever remain visible, structurally, not by rendering coincidence.
+  - Both the live cards/narration and a full history-reconstruction path
+    (`groupActivityCallsByFinalTurn`, mirrors `collapseToFinalTurns`' own
+    traversal so the same real tool-call data that function currently
+    discards is preserved and re-rendered) ship together -- reloading the
+    page or reselecting a chat now shows the same real activity cards
+    instead of losing all step detail, closing the persistence gap the
+    old design accepted deliberately.
+  - No diff view (per explicit choice): expanding a card shows current/new
+    content, not a diff -- `write_file`'s own tool call never carries a
+    "before" version, so real diffing needs new backend work this pass
+    deliberately doesn't include.
 - Workspace panel: a live file list + content viewer alongside the chat,
   showing every file a bot's own `write_file`/`read_file` tool calls have
   actually touched. Real gap found live: the existing `/files` page is a

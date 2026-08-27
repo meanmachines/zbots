@@ -776,7 +776,7 @@ function messageText(row, kind) {
 // a second call the way the old version could.
 let renderGeneration = 0;
 
-function renderMessages(rows, kind, previewPaths) {
+function renderMessages(rows, kind, previewPaths, activityGroups) {
   const pane = document.getElementById("messages-pane");
   const myGeneration = ++renderGeneration;
   // Only messages beyond what the previous render already showed get the
@@ -848,6 +848,26 @@ function renderMessages(rows, kind, previewPaths) {
     });
     meta.appendChild(copyBtn);
     div.appendChild(meta);
+
+    // Reconstructed activity cards for this turn (see
+    // groupActivityCallsByFinalTurn's own comment) -- rendered BEFORE the
+    // final answer bubble, matching the live order actions actually
+    // happened in (act, then answer). Historical, so each card renders
+    // already-"done" with no duration badge (no real timing data survives
+    // in persisted history) -- read_file's content is filled in
+    // afterward, cache-first, same as the live path.
+    if (!isUser && activityGroups && activityGroups.has(row)) {
+      const activityWrap = document.createElement("div");
+      activityWrap.className = "turn-wrapper history-activity";
+      for (const { toolName, args } of activityGroups.get(row)) {
+        const card = createActivityCard(activityWrap, toolName, null, args);
+        completeActivityCard(card, null);
+        if (toolName === "read_file" && args && args.path) fillReadFileActivityCardBody(card, args.path);
+      }
+      if (i >= animateFrom) activityWrap.classList.add("msg-pop");
+      pane.appendChild(activityWrap);
+      anchors.push({ node: activityWrap, ts: ts || 0 });
+    }
 
     if (i >= animateFrom) div.classList.add("msg-pop");
     pane.appendChild(div);
@@ -965,92 +985,187 @@ function toolStatusLabel(toolName, preview, args) {
       if (action === "delete" || action === "remove" || action === "forget") return "Updating memory";
       return "Using memory";
     }
+    // Real gap found live: these four are the tools that actually matter
+    // most for coding work, and every one of them fell through to the
+    // generic "Using write file"/"Using terminal" default below -- no
+    // filename, no command -- even though payload.preview/args already
+    // carry that live over SSE. This is also what activityCardLabel below
+    // reuses for its own one-line summary, so fixing it here fixes both.
+    case "write_file": {
+      const path = (args && args.path) || preview;
+      return path ? `Wrote ${basename(path)}` : "Writing a file";
+    }
+    case "read_file": {
+      const path = (args && args.path) || preview;
+      return path ? `Read ${basename(path)}` : "Reading a file";
+    }
+    case "terminal": {
+      const command = (args && args.command) || preview;
+      return command ? `Ran: ${truncateMiddle(command, 60)}` : "Running a command";
+    }
+    case "process": {
+      const action = (args && args.action) || "";
+      if (action === "kill") return `Stopped ${(args && args.session_id) || "a background process"}`;
+      if (action === "list" || action === "status") return "Checked running processes";
+      if (action === "logs") return "Checked process output";
+      const command = args && args.command;
+      return command ? `Started: ${truncateMiddle(command, 60)}` : "Managing a background process";
+    }
     default:
       // Humanize an unmapped tool name -- "web_search" -> "Using web search".
       return "Using " + bare.replace(/_/g, " ");
   }
 }
 
-// Collapsible "thinking" panel -- accumulates tool-call/reasoning activity
-// for one in-flight turn as a scrollable, collapsed-by-default log instead
-// of ever rendering it as the visible reply. Real bug this replaces: the
-// previous design rendered each assistant.delta live into what looked
-// like the final answer bubble, then deleted that bubble whenever a tool
-// call followed (see toolStatusLabel's own comment above) -- with several
-// tool calls in one turn that's a repeated write-then-erase of a
-// bubble-shaped thing, which reads as flickering (reported live). Fix:
-// never show in-progress text as if it were the answer. While a turn
-// runs, only two things are visible -- the existing typing indicator
-// (nothing has happened yet) and this panel's own live summary line
-// (something is happening, and what); its log is opt-in detail behind the
-// native <details> toggle, same pattern as a desktop chat app's "thought
-// for Xs" affordance. The real final answer always comes from
-// assistant.completed's own authoritative `content` field (see
-// engine.py's _process_sse_frame docstring -- the same field the
-// non-streaming path already used), rendered exactly once, so it can
-// never be shown and then discarded.
-let thinkingLastLine = null;
+function basename(path) {
+  const parts = String(path).split("/");
+  return parts[parts.length - 1] || path;
+}
 
-function getThinkingPanel() {
-  let wrap = document.getElementById("thinking-wrap");
-  if (wrap) return wrap;
+function truncateMiddle(text, max) {
+  if (text.length <= max) return text;
+  const half = Math.floor((max - 1) / 2);
+  return text.slice(0, half) + "…" + text.slice(text.length - half);
+}
+
+// Turn wrapper -- one container per turn ATTEMPT (not the same as "per
+// turn": a rollover starts a genuinely new attempt mid-stream, see
+// streamBotReply's own run.started handling for why). Holds a live
+// collapsible narration block and per-tool-call activity cards in real
+// arrival order, interleaved exactly as they happen -- replaces the old
+// single shared "thinking" panel's one-log-per-turn design with hermes-
+// agent's own desktop pattern: real narration text (collapsed by default,
+// dim/muted -- explicit user ask, styled distinctly from a finished reply
+// so it always reads as "in progress," never "the answer") plus one small
+// expandable card per action, not a shared text log.
+//
+// Tracked at module level (not local to one streamBotReply call) only so
+// sendComposerMessage's own error-cleanup path can remove an orphaned
+// wrapper without needing a fixed DOM id -- same scope/limitation the
+// pre-existing #optimistic-user-msg cleanup already has (single active
+// chat's DOM at a time; a non-selected bot's stream never touches the DOM
+// at all, gated by isStillActive() throughout).
+let activeTurnWrapper = null;
+
+function createTurnWrapper() {
   const pane = document.getElementById("messages-pane");
-  wrap = document.createElement("div");
-  wrap.id = "thinking-wrap";
-  wrap.className = "msg bot msg-pop";
-  wrap.innerHTML =
-    '<details class="thinking-panel" id="thinking-panel">' +
-    '<summary id="thinking-summary">Thinking…</summary>' +
-    '<div class="thinking-log" id="thinking-log"></div>' +
-    "</details>";
+  const wrap = document.createElement("div");
+  wrap.className = "msg bot msg-pop turn-wrapper";
   pane.appendChild(wrap);
   pane.scrollTop = pane.scrollHeight;
-  thinkingLastLine = null;
+  activeTurnWrapper = wrap;
   return wrap;
 }
 
-function setThinkingSummary(text) {
-  getThinkingPanel();
-  document.getElementById("thinking-summary").textContent = text;
+function createNarrationBlock(wrap) {
+  const details = document.createElement("details");
+  details.className = "msg-narration";
+  const summary = document.createElement("summary");
+  summary.textContent = "Thinking…";
+  const body = document.createElement("div");
+  body.className = "msg-narration-body";
+  details.appendChild(summary);
+  details.appendChild(body);
+  wrap.appendChild(details);
+  const pane = document.getElementById("messages-pane");
+  pane.scrollTop = pane.scrollHeight;
+  return details;
 }
 
-function logThinkingStep(text) {
-  getThinkingPanel();
-  setThinkingSummary(text);
-  if (text === thinkingLastLine) return; // dedupe consecutive repeats (e.g. several "Thinking" ticks in a row)
-  thinkingLastLine = text;
-  const log = document.getElementById("thinking-log");
-  const line = document.createElement("div");
-  line.className = "thinking-step";
-  line.textContent = text;
-  log.appendChild(line);
-  const panel = document.getElementById("thinking-panel");
-  if (panel.open) {
-    const pane = document.getElementById("messages-pane");
-    pane.scrollTop = pane.scrollHeight;
+// One small collapsible card per tool call -- status icon (pending until
+// tool.completed lands), the richer toolStatusLabel from above, and
+// whatever real content is available immediately (write_file: its own
+// args.content, already the full new file text; terminal: the command
+// itself, no live output -- see this plan's own notes on why output only
+// ever reaches history, not the live stream). read_file's content is
+// filled in asynchronously by the caller (fillReadFileActivityCardBody)
+// since it needs a fetch, not something available on tool.started itself.
+function createActivityCard(wrap, toolName, preview, args) {
+  const card = document.createElement("details");
+  card.className = "activity-card";
+  const summary = document.createElement("summary");
+  const statusIcon = document.createElement("span");
+  statusIcon.className = "activity-card-status pending";
+  const label = document.createElement("span");
+  label.className = "activity-card-label";
+  label.textContent = toolStatusLabel(toolName, preview, args);
+  summary.appendChild(statusIcon);
+  summary.appendChild(label);
+  card.appendChild(summary);
+  const bodyText = activityCardInitialBody(toolName, args);
+  if (bodyText != null) {
+    const pre = document.createElement("pre");
+    pre.className = "activity-card-body";
+    pre.textContent = bodyText;
+    card.appendChild(pre);
+  }
+  wrap.appendChild(card);
+  const pane = document.getElementById("messages-pane");
+  pane.scrollTop = pane.scrollHeight;
+  return card;
+}
+
+function activityCardInitialBody(toolName, args) {
+  if (toolName === "write_file" && args && typeof args.content === "string") return args.content;
+  if (toolName === "terminal" && args && args.command) return args.command;
+  return null;
+}
+
+// read_file's own tool.started args carry only a path, not content (the
+// file's bytes are the TOOL RESULT, never streamed to the client on
+// either event -- see this plan's own research) -- fetched the same way
+// the Workspace panel's file viewer already does, cache-first.
+async function fillReadFileActivityCardBody(card, path) {
+  if (!path || !selected) return;
+  let content = null;
+  const cached = workspaceFiles.get(path);
+  if (cached && cached.content != null) {
+    content = cached.content;
+  } else {
+    try {
+      const result = await apiGet(`/bots/${selected.id}/workspace/file?path=${encodeURIComponent(path)}`);
+      content = result.content;
+    } catch (_) {
+      return;
+    }
+  }
+  const pre = document.createElement("pre");
+  pre.className = "activity-card-body";
+  pre.textContent = content;
+  card.appendChild(pre);
+}
+
+function completeActivityCard(card, startedAt) {
+  const statusIcon = card.querySelector(".activity-card-status");
+  if (statusIcon) {
+    statusIcon.classList.remove("pending");
+    statusIcon.classList.add("done");
+  }
+  if (startedAt) {
+    const elapsedMs = Date.now() - startedAt;
+    const badge = document.createElement("span");
+    badge.className = "activity-card-duration";
+    badge.textContent = elapsedMs < 1000 ? `${elapsedMs}ms` : `${(elapsedMs / 1000).toFixed(elapsedMs < 10000 ? 1 : 0)}s`;
+    card.querySelector("summary").appendChild(badge);
   }
 }
 
-// Called once the turn is over (success or error) -- swaps the live,
-// pulsing summary line for a static one so a collapsed panel doesn't look
-// like it's still working after the fact.
-function finalizeThinkingPanel() {
-  const summary = document.getElementById("thinking-summary");
-  if (summary) summary.textContent = "Show steps";
-  thinkingLastLine = null;
-}
-
-function appendFinalBotMessage(content) {
+// The authoritative final text has arrived (assistant.completed) --
+// removes the provisional, collapsed-by-default narration and renders the
+// real, always-visible, markdown-formatted reply in its place. Activity
+// cards from this attempt are left exactly where they are -- they're a
+// real record of what happened, not provisional the way raw streamed text
+// is.
+function finalizeTurnWrapper(wrap, narrationBlock, content) {
+  if (narrationBlock) narrationBlock.remove();
+  if (typeof content === "string" && content.trim()) {
+    const body = document.createElement("div");
+    body.className = "msg-body";
+    body.innerHTML = renderMarkdown(content);
+    wrap.appendChild(body);
+  }
   const pane = document.getElementById("messages-pane");
-  const div = document.createElement("div");
-  div.className = "msg bot msg-pop";
-  const body = document.createElement("div");
-  body.className = "msg-body";
-  body.innerHTML = renderMarkdown(content);
-  div.appendChild(body);
-  pane.appendChild(div);
   pane.scrollTop = pane.scrollHeight;
-  return div;
 }
 
 // Live preview of a file a bot just built -- pages, images, icons, any
@@ -1491,6 +1606,22 @@ async function streamBotReply(botName, text, isStillActive) {
   const decoder = new TextDecoder("utf-8");
   let buf = "";
   const previewPathCandidates = new Set();
+  // Per-attempt state -- see createTurnWrapper's own comment for why
+  // "attempt" and "turn" aren't the same thing. sawRunStarted distinguishes
+  // the first run.started (a turn beginning) from a second/later one (a
+  // rollover -- the backend abandoned the previous attempt and started a
+  // genuinely new one, confirmed live via engine.py's own _chunks(), which
+  // forwards assistant.delta unconditionally but only ever lets ONE
+  // attempt's assistant.completed/run.completed/error through). Tearing
+  // the whole wrapper down and starting fresh on that signal is what makes
+  // live narration safe to show at all -- nothing from an abandoned
+  // attempt can survive to be seen, because it's structurally removed the
+  // moment the backend's own signal says to discard it, not left to a
+  // rendering coincidence.
+  let wrap = null;
+  let narrationBlock = null;
+  let sawRunStarted = false;
+  const pendingCards = []; // FIFO -- tool.started/tool.completed always pair in arrival order
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -1513,15 +1644,29 @@ async function streamBotReply(botName, text, isStillActive) {
         continue;
       }
       if (!isStillActive()) continue;
-      if (eventName === "assistant.delta" && payload.delta) {
-        // Never rendered live (see getThinkingPanel's own comment) -- just
-        // flips the ambient status to something honest while tokens are
-        // actually arriving.
+      if (eventName === "run.started") {
+        if (sawRunStarted && wrap) {
+          // A rollover -- the previous attempt is dead, discard everything
+          // it showed and start clean.
+          wrap.remove();
+          pendingCards.length = 0;
+        }
+        sawRunStarted = true;
+        wrap = createTurnWrapper();
+        narrationBlock = null;
+      } else if (eventName === "assistant.delta" && payload.delta) {
+        if (!wrap) wrap = createTurnWrapper(); // defensive -- real streams always send run.started first
         hideTypingIndicator();
-        setThinkingSummary("Responding…");
+        if (!narrationBlock) narrationBlock = createNarrationBlock(wrap);
+        narrationBlock.querySelector(".msg-narration-body").textContent += payload.delta;
+        const summary = narrationBlock.querySelector("summary");
+        if (summary.textContent !== "Thoughts") summary.textContent = "Thoughts";
       } else if (eventName === "tool.started") {
+        if (!wrap) wrap = createTurnWrapper();
         hideTypingIndicator();
-        logThinkingStep(toolStatusLabel(payload.tool_name, payload.preview, payload.args));
+        narrationBlock = null; // next delta (if any) starts a fresh block after this card
+        const card = createActivityCard(wrap, payload.tool_name, payload.preview, payload.args);
+        pendingCards.push({ card, startedAt: Date.now() });
         findPreviewPathsInArgs(payload.args, previewPathCandidates, 0);
         if (
           (payload.tool_name === "write_file" || payload.tool_name === "read_file") &&
@@ -1534,31 +1679,33 @@ async function streamBotReply(botName, text, isStillActive) {
             ts: existing ? existing.ts : Date.now() / 1000,
           });
           if (document.getElementById("workspace-pane").classList.contains("open")) renderWorkspacePanel();
+          if (payload.tool_name === "read_file") fillReadFileActivityCardBody(card, payload.args.path);
         }
+      } else if (eventName === "tool.completed") {
+        const pending = pendingCards.shift();
+        if (pending) completeActivityCard(pending.card, pending.startedAt);
       } else if (eventName === "tool.progress" && payload.tool_name === "_thinking") {
+        if (!wrap) wrap = createTurnWrapper();
         hideTypingIndicator();
-        logThinkingStep("Thinking");
+        if (!narrationBlock) narrationBlock = createNarrationBlock(wrap);
       } else if (eventName === "assistant.completed") {
-        // The one and only source of the visible reply -- see this
-        // function's own header comment for why deltas never render
-        // directly. content is the real handler's full, final text
+        // The authoritative final text -- see finalizeTurnWrapper's own
+        // comment. content is the real handler's full, final text
         // regardless of how many delta/tool cycles preceded it.
         hideTypingIndicator();
-        finalizeThinkingPanel();
-        if (typeof payload.content === "string" && payload.content.trim()) {
-          appendFinalBotMessage(payload.content);
-        }
+        if (!wrap) wrap = createTurnWrapper();
+        finalizeTurnWrapper(wrap, narrationBlock, payload.content);
+        narrationBlock = null;
+        activeTurnWrapper = null; // this attempt finished cleanly, nothing left to clean up on error
         for (const path of previewPathCandidates) {
           await appendPreviewCard(path);
         }
       } else if (eventName === "run.completed" || eventName === "error") {
         hideTypingIndicator();
-        finalizeThinkingPanel();
       }
     }
   }
   hideTypingIndicator();
-  finalizeThinkingPanel();
 }
 
 function extractText(row) {
@@ -1620,6 +1767,51 @@ function collapseToFinalTurns(rows) {
   return collapsed;
 }
 
+// Mirrors collapseToFinalTurns' own exact traversal/reset rules (same
+// user-row/internal-trigger boundaries) but instead of keeping only the
+// final non-empty assistant row, accumulates every tool call seen since
+// the last boundary and attaches that whole list to whichever row ends up
+// being the one collapseToFinalTurns actually keeps (same row object
+// reference, since neither function copies rows -- a plain Map keyed by
+// row works to look these back up in renderMessages). This is what closes
+// the "reload loses every activity card" gap: the intermediate assistant
+// turns collapseToFinalTurns drops (a real "let me check..." turn with
+// tool_calls but no final content of its own) carried the actual tool
+// call data all along -- it was just never kept anywhere after being
+// dropped, same real data findWorkspaceFilesInHistory already reads for
+// the Workspace panel, generalized here to every tool name.
+function groupActivityCallsByFinalTurn(rawRows) {
+  const groups = new Map(); // finalAssistantRow -> [{toolName, args}]
+  let pending = [];
+  let pendingFinalRow = null;
+  const flush = () => {
+    if (pendingFinalRow && pending.length) groups.set(pendingFinalRow, pending);
+    pending = [];
+    pendingFinalRow = null;
+  };
+  for (const row of rawRows) {
+    if (isInternalTrigger(row)) {
+      flush();
+    } else if (row.role === "user") {
+      flush();
+    } else if (row.role === "assistant") {
+      for (const call of row.tool_calls || []) {
+        const fn = (call && call.function) || {};
+        let args;
+        try {
+          args = JSON.parse(fn.arguments || "{}");
+        } catch (_) {
+          args = {};
+        }
+        pending.push({ toolName: fn.name, args });
+      }
+      if (extractText(row).trim()) pendingFinalRow = row;
+    }
+  }
+  flush();
+  return groups;
+}
+
 async function loadMessages(fromPoll = false) {
   if (!selected) return;
   // A background poll firing mid-send would rebuild the pane from
@@ -1646,8 +1838,9 @@ async function loadMessages(fromPoll = false) {
       const previewPaths = findPreviewPathsInHistory(rows || []);
       workspaceFiles = findWorkspaceFilesInHistory(rows || []);
       if (document.getElementById("workspace-pane").classList.contains("open")) renderWorkspacePanel();
+      const activityGroups = groupActivityCallsByFinalTurn(rows || []);
       const chatRows = collapseToFinalTurns((rows || []).filter((r) => r.role === "user" || r.role === "assistant"));
-      renderMessages(chatRows, "bot", previewPaths);
+      renderMessages(chatRows, "bot", previewPaths, activityGroups);
     } else {
       const rows = await apiGet(`/groups/${selected.id}/messages`);
       const sig = JSON.stringify(rows);
@@ -1737,7 +1930,8 @@ async function sendComposerMessage() {
     if (isStillActive()) {
       hideTypingIndicator();
       document.getElementById("optimistic-user-msg")?.remove();
-      document.getElementById("thinking-wrap")?.remove();
+      activeTurnWrapper?.remove();
+      activeTurnWrapper = null;
       input.value = text;
     }
     toast(`Send to ${target.id} failed: ` + e.message);

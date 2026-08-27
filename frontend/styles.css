@@ -545,16 +545,27 @@ input:focus, textarea:focus, select:focus {
   30% { transform: translateY(-4px); opacity: 1; }
 }
 
-/* Collapsible "thinking" panel -- everything that happens while a turn is
-   in flight (tool calls, reasoning ticks) lives here as quiet, opt-in
-   detail, never as the visible reply itself (see app.js's getThinkingPanel
-   for the flicker bug this replaces). Collapsed by default, same
-   affordance as a native <details> disclosure triangle. */
-.thinking-panel {
+/* Turn wrapper -- one .msg.bot-styled container per live turn ATTEMPT,
+   holding a collapsible narration block and per-tool-call activity cards
+   in real arrival order (see app.js's createTurnWrapper for why "attempt"
+   and "turn" differ on a rollover). Reused for historical reconstruction
+   too (renderMessages' own activityGroups rendering, class
+   "history-activity") so both paths look identical. */
+.turn-wrapper { display: flex; flex-direction: column; gap: 0.35rem; }
+
+/* Live narration -- the model's own in-progress text, collapsed by
+   default and visually dim throughout (explicit ask: never the same
+   weight as a finished reply, so it always reads as "in progress," not
+   "the answer" -- see app.js's finalizeTurnWrapper for how the real,
+   full-brightness reply replaces this once assistant.completed lands).
+   Same disclosure-chevron affordance as the old thinking-panel this
+   replaces, styled the same "Thought for Xs" way a desktop coding-agent
+   UI does. */
+.msg-narration {
   font-size: 0.78rem;
   color: var(--text-muted);
 }
-.thinking-panel summary {
+.msg-narration summary {
   display: flex;
   align-items: center;
   gap: 0.4rem;
@@ -564,8 +575,8 @@ input:focus, textarea:focus, select:focus {
   list-style: none;
   user-select: none;
 }
-.thinking-panel summary::-webkit-details-marker { display: none; }
-.thinking-panel summary::before {
+.msg-narration summary::-webkit-details-marker { display: none; }
+.msg-narration summary::before {
   content: "";
   width: 5px;
   height: 5px;
@@ -573,10 +584,10 @@ input:focus, textarea:focus, select:focus {
   background: var(--text-muted);
   flex-shrink: 0;
 }
-.thinking-panel:not([open]) summary::before {
+.msg-narration:not([open]) summary::before {
   animation: typing-bounce 1.1s infinite ease-in-out;
 }
-.thinking-panel summary::after {
+.msg-narration summary::after {
   content: "";
   width: 0;
   height: 0;
@@ -587,16 +598,59 @@ input:focus, textarea:focus, select:focus {
   opacity: 0.6;
   transition: transform 0.15s ease;
 }
-.thinking-panel[open] summary::after { transform: rotate(-180deg); }
-.thinking-log {
-  display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
+.msg-narration[open] summary::after { transform: rotate(-180deg); }
+.msg-narration-body {
   padding: 0.3rem 0 0.2rem 0.85rem;
   border-left: 2px solid var(--border);
   margin: 0.15rem 0 0 0.15rem;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
-.thinking-step { font-style: normal; }
+
+/* Activity card -- one small collapsible per tool call (write_file,
+   terminal, ...), replacing the old thinking-panel's single shared text
+   log. Status dot (pending/done), the richer toolStatusLabel, and a
+   duration badge once complete; body (when there's real content --
+   write_file's new content, read_file's fetched content, terminal's own
+   command) is opt-in behind the same disclosure toggle. */
+.activity-card {
+  font-size: 0.78rem;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) * 0.5);
+  background: var(--card);
+}
+.activity-card summary {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.4rem 0.6rem;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.activity-card summary::-webkit-details-marker { display: none; }
+.activity-card-status {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex-shrink: 0;
+}
+.activity-card-status.pending { animation: typing-bounce 1.1s infinite ease-in-out; }
+.activity-card-status.done { background: #3fb950; animation: none; }
+.activity-card-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity-card-duration { font-size: 0.7rem; color: var(--text-muted); font-family: ui-monospace, monospace; }
+.activity-card-body {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  border-top: 1px solid var(--border);
+  font-family: ui-monospace, monospace;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 40vh;
+  overflow: auto;
+}
 
 /* Live preview chip -- a bot-generated HTML file gets a small clickable
    card in the chat instead of being a file the user has to already know
