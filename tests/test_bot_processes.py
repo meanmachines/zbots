@@ -469,6 +469,22 @@ def test_listening_ports_finds_a_socket_owned_by_a_child_process(monkeypatch):
     assert bot_processes.listening_ports("coder") == [{"port": 8790, "pid": 777}]
 
 
+def test_listening_ports_excludes_the_workers_own_gateway_port(monkeypatch):
+    # Real bug found live: the worker's own /api/.../v1/... chat server is
+    # itself always listening, on its own root pid, on the exact port this
+    # registry already assigned it -- without this exclusion every bot
+    # reports itself as "a live preview" permanently, regardless of
+    # whether its own tools have ever started anything.
+    bot_processes.REGISTRY_PATH.write_text(
+        json.dumps({"ports": {"coder": 8703}, "workers": {"coder": {"pid": os.getpid(), "port": 8703, "started_at": 0}}})
+    )
+    _use_fake_psutil(
+        monkeypatch,
+        {os.getpid(): {"children": [], "conns": [_FakeConn("LISTEN", 8703)]}},
+    )
+    assert bot_processes.listening_ports("coder") == []
+
+
 def test_listening_ports_ignores_non_listen_connections(monkeypatch):
     bot_processes.REGISTRY_PATH.write_text(
         json.dumps({"ports": {"coder": 8700}, "workers": {"coder": {"pid": os.getpid(), "port": 8700, "started_at": 0}}})

@@ -226,11 +226,20 @@ def listening_ports(profile: str) -> list[dict]:
     new tool. Safe only because a background process a bot starts shares
     this same container/process tree (see bot_worker.py's own module
     docstring) -- there's no sandbox boundary to cross.
+
+    Real bug found live: the worker's OWN gateway process (its
+    /api/.../v1/... chat server, on the port this same registry already
+    assigned it) is itself always listening, on the worker's own root pid --
+    scanning the process tree without excluding it means every bot reports
+    itself as "a live preview," permanently, regardless of whether its
+    tools have started anything. That port is excluded here; everything
+    else found is a genuine child process the bot's own tools started.
     """
     worker = _read_registry()["workers"].get(profile)
     if not worker:
         return []
     pid = int(worker["pid"])
+    own_gateway_port = int(worker["port"])
     if not _pid_alive(pid):
         return []
     try:
@@ -252,7 +261,7 @@ def listening_ports(profile: str) -> list[dict]:
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
         for conn in conns:
-            if conn.status == psutil.CONN_LISTEN and conn.laddr:
+            if conn.status == psutil.CONN_LISTEN and conn.laddr and conn.laddr.port != own_gateway_port:
                 ports[conn.laddr.port] = candidate_pid
     return [{"port": port, "pid": owner_pid} for port, owner_pid in sorted(ports.items())]
 
